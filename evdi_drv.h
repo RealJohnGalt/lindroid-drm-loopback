@@ -399,6 +399,79 @@ static __always_inline void evdi_smp_mb(void)
 #define EVDI_HAVE_CONNECTOR_INIT_WITH_DDC 0
 #endif
 
+#if KERNEL_VERSION(5, 15, 0) <= LINUX_VERSION_CODE && defined(CONFIG_ARM64)
+#define EVDI_HAVE_LLIST_RELAXED	1
+#else
+#define EVDI_HAVE_LLIST_RELAXED	0
+#endif
+
+#if KERNEL_VERSION(5, 0, 0) <= LINUX_VERSION_CODE && defined(CONFIG_ARM64)
+#define EVDI_HAVE_ATOMIC_RELAXED	1
+#else
+#define EVDI_HAVE_ATOMIC_RELAXED	0
+#endif
+
+static __always_inline bool evdi_llist_add(struct llist_node *node, struct llist_head *head)
+{
+#if EVDI_HAVE_LLIST_RELAXED
+	return llist_add_relaxed(node, head);
+#else
+	return llist_add(node, head);
+#endif
+
+static __always_inline void evdi_atomic_inc(atomic_t *v)
+{
+#if EVDI_HAVE_ATOMIC_RELAXED
+	(void)atomic_add_return_relaxed(1, v);
+#else
+	atomic_inc(v);
+#endif
+
+static __always_inline void evdi_atomic_dec(atomic_t *v)
+{
+#if EVDI_HAVE_ATOMIC_RELAXED
+	(void)atomic_add_return_relaxed(-1, v);
+#else
+	atomic_dec(v);
+#endif
+}
+
+static __always_inline int evdi_atomic_read(const atomic_t *v)
+{
+#if EVDI_HAVE_ATOMIC_RELAXED
+	return atomic_read_acquire(v);
+#else
+	return atomic_read(v);
+#endif
+}
+
+static __always_inline void evdi_atomic64_inc(atomic64_t *v)
+{
+#if EVDI_HAVE_ATOMIC_RELAXED
+	(void)atomic64_add_return_relaxed(1, v);
+#else
+	atomic64_inc(v);
+#endif
+}
+
+static __always_inline void evdi_atomic64_dec(atomic64_t *v)
+{
+#if EVDI_HAVE_ATOMIC_RELAXED
+	(void)atomic64_add_return_relaxed(-1, v);
+#else
+	atomic64_dec(v);
+#endif
+}
+
+static __always_inline s64 evdi_atomic64_read(const atomic64_t *v)
+{
+#if EVDI_HAVE_ATOMIC_RELAXED
+	return atomic64_read_acquire(v);
+#else
+	return atomic64_read(v);
+#endif
+}
+
 #define EVDI_MAX_INFLIGHT_REQUESTS 1000
 
 /* Debug and statistics */
