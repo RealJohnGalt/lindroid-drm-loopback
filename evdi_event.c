@@ -11,6 +11,7 @@
 
 struct evdi_event_pool global_event_pool = {0};
 static void evdi_inflight_req_release(struct kref *kref);
+void evdi_event_free_immediate(struct evdi_event *event);
 
 DEFINE_STATIC_KEY_FALSE(evdi_perf_key);
 bool evdi_perf_on;
@@ -348,10 +349,12 @@ struct evdi_event *evdi_event_alloc(struct evdi_device *evdi,
 				   int poll_id,
 				   void *data,
 				   size_t data_size,
+				   bool async,
 				   struct drm_file *owner)
 {
 	struct evdi_event *event;
 	int cur_alloc, peak, new_peak;
+	gfp_t gfp = GFP_ATOMIC;
 
 	event = evdi_pcpu_event_pop();
 	if (event) {
@@ -380,7 +383,18 @@ struct evdi_event *evdi_event_alloc(struct evdi_device *evdi,
 init_event:
 	event->type = type;
 	event->poll_id = poll_id;
-	event->data = data;
+	event->async = async;
+	if(async) {
+		if (data_size) {
+			event->data = kmemdup(data, data_size, gfp);
+			if (!event->data) {
+				evdi_event_free_immediate(event);
+				return NULL;
+			}
+		}
+	} else {
+		event->data = data;
+	}
 	event->data_size = data_size;
 	event->payload_type = 0;
 	event->next = NULL;
@@ -571,6 +585,9 @@ void evdi_event_free(struct evdi_event *event)
 
 	if (atomic_xchg(&event->freed, 1))
 		return;
+
+	if (event->async)
+		kfree(event->data);
 
 	call_rcu(&event->rcu, evdi_event_free_rcu);
 }
