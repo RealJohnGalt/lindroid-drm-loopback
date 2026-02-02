@@ -91,16 +91,18 @@ static void evdi_pipe_update(struct drm_simple_display_pipe *pipe,
 			/* Drop backpressure to avoid stalls. */
 			atomic_set(&evdi->swap_pending_pollid[slot], 0);
 			atomic_set(&evdi->swap_pending[slot], 0);
+			atomic_set(&evdi->swap_pending_bufid[slot], 0);
 		}
 	}
 
 	efb = to_evdi_fb(fb);
 
-	if (efb && efb->owner && efb->gralloc_buf_id)
+	if (efb && efb->owner && efb->gralloc_buf_id > 0 && efb->gralloc_buf_id <= INT_MAX) {
 		evdi_queue_swap_event(evdi,
 				      efb->gralloc_buf_id,
 				      slot,
 				      efb->owner);
+	}
 
 	if (unlikely(!READ_ONCE(evdi->drm_client)))
 		return;

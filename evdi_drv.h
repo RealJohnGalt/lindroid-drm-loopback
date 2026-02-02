@@ -317,8 +317,10 @@ struct evdi_device {
 	wait_queue_head_t swap_ack_waitq;
 	atomic_t swap_pending[LINDROID_MAX_CONNECTORS];
 	atomic_t swap_pending_pollid[LINDROID_MAX_CONNECTORS];
+	atomic_t swap_pending_bufid[LINDROID_MAX_CONNECTORS];
 
 	struct mutex config_mutex;
+	struct mutex fence_mutex;
 
 	struct platform_device *pdev;
 
@@ -326,11 +328,17 @@ struct evdi_device {
 	struct xarray file_xa;
 	struct xarray inflight_xa;
 	u32 inflight_next_id;
+	struct xarray acquire_fence_xa[LINDROID_MAX_CONNECTORS];
+	struct xarray release_fence_xa;
 #else
 	struct idr file_idr;
 	spinlock_t file_lock;
 	struct idr inflight_idr;
 	spinlock_t inflight_lock;
+	struct idr acquire_fence_idr[LINDROID_MAX_CONNECTORS];
+	spinlock_t acquire_fence_lock[LINDROID_MAX_CONNECTORS];
+	struct idr release_fence_idr;
+	spinlock_t release_fence_lock;
 #endif
 	struct evdi_percpu_inflight __percpu	*percpu_inflight;
 };
@@ -368,6 +376,16 @@ void evdi_modeset_cleanup(struct drm_device *dev);
 int evdi_connector_init(struct drm_device *dev, struct evdi_device *evdi);
 void evdi_connector_cleanup(struct evdi_device *evdi);
 
+/* evdi_fence.c */
+void evdi_fence_tables_init(struct evdi_device *evdi);
+void evdi_fence_tables_cleanup(struct evdi_device *evdi);
+void evdi_acquire_fence_set_fd(struct evdi_device *evdi, u32 display_id, u32 bufid, int acquire_fence_fd);
+int evdi_acquire_fence_take_export_syncfd(struct evdi_device *evdi, u32 display_id, u32 bufid, struct file **out_file);
+void evdi_release_fence_set_fd(struct evdi_device *evdi, u32 bufid, int release_fence_fd);
+void evdi_fence_tables_reset(struct evdi_device *evdi);
+void evdi_acquire_fence_drop_all(struct evdi_device *evdi, u32 bufid);
+void evdi_release_fence_drop(struct evdi_device *evdi, u32 bufid);
+
 /* evdi_ioctl.c */
 int evdi_ioctl_connect(struct drm_device *dev, void *data, struct drm_file *file);
 int evdi_ioctl_poll(struct drm_device *dev, void *data, struct drm_file *file);
@@ -376,12 +394,13 @@ int evdi_ioctl_destroy_buff_callback(struct drm_device *dev, void *data, struct 
 int evdi_ioctl_swap_callback(struct drm_device *dev, void *data, struct drm_file *file);
 int evdi_ioctl_create_buff_callback(struct drm_device *dev, void *data, struct drm_file *file);
 int evdi_ioctl_gbm_create_buff(struct drm_device *dev, void *data, struct drm_file *file);
-void evdi_inflight_discard_owner(struct evdi_device *evdi, struct drm_file *owner);
 int evdi_ioctl_request_update(struct drm_device *dev, void *data, struct drm_file *file);
 int evdi_ioctl_gbm_get_buff(struct drm_device *dev, void *data, struct drm_file *file);
 int evdi_ioctl_gbm_del_buff(struct drm_device *dev, void *data, struct drm_file *file);
+int evdi_ioctl_set_acquire_fence(struct drm_device *dev, void *data, struct drm_file *file);
 int evdi_queue_swap_event(struct evdi_device *evdi, int id, int display_id, struct drm_file *owner);
 int evdi_queue_destroy_event(struct evdi_device *evdi, int id, struct drm_file *owner);
+void evdi_inflight_discard_owner(struct evdi_device *evdi, struct drm_file *owner);
 
 /* evdi_event.c */
 int evdi_event_init(struct evdi_device *evdi);

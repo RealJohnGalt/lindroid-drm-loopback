@@ -558,8 +558,14 @@ int evdi_ioctl_poll(struct drm_device *dev, void *data, struct drm_file *file)
 	struct drm_evdi_poll *cmd = data;
 	struct evdi_event *event;
 	struct evdi_swap sw;
+	struct drm_evdi_swap_event swu;
+	struct {
+		int id;
+		int display_id;
+	} sw_legacy;
+	struct file *syncfile;
 	size_t payload_size;
-	int ret, poll_id;
+	int ret, poll_id, syncfd;
 
 	u8 payload_buf[EVDI_EVENT_PAYLOAD_MAX];
 
@@ -570,8 +576,37 @@ int evdi_ioctl_poll(struct drm_device *dev, void *data, struct drm_file *file)
 		cmd->event = swap_to;
 		cmd->poll_id = poll_id;
 		if (cmd->data) {
-			if (evdi_copy_to_user_allow_partial(cmd->data, &sw, sizeof(sw)))
-				return -EFAULT;
+			memset(&swu, 0, sizeof(swu));
+			memset(&sw_legacy, 0, sizeof(sw_legacy));
+			syncfile = NULL;
+			sw_legacy.id = sw.id;
+			sw_legacy.display_id = sw.display_id;
+			swu.id = sw.id;
+			swu.display_id = sw.display_id;
+			swu.acquire_fence_fd = -1;
+			syncfd = evdi_acquire_fence_take_export_syncfd(evdi,
+								      (u32)sw.display_id,
+								      (u32)sw.id,
+								      &syncfile);
+			if (syncfd >= 0 && syncfile)
+				swu.acquire_fence_fd = syncfd;
+			else if (syncfd >= 0) {
+				put_unused_fd(syncfd);
+				syncfd = -1;
+			}
+			if (copy_to_user(cmd->data, &swu, sizeof(swu))) {
+				if (syncfd >= 0) {
+					put_unused_fd(syncfd);
+					if (syncfile)
+						fput(syncfile);
+					syncfd = -1;
+					swu.acquire_fence_fd = -1;
+				}
+				if (copy_to_user(cmd->data, &sw_legacy, sizeof(sw_legacy)))
+					return -EFAULT;
+			}
+			if (syncfd >= 0)
+				fd_install(syncfd, syncfile);
 		}
 		EVDI_PERF_INC64(&evdi_perf.swap_delivered);
 		return 0;
@@ -602,8 +637,38 @@ int evdi_ioctl_poll(struct drm_device *dev, void *data, struct drm_file *file)
 		cmd->event = swap_to;
 		cmd->poll_id = poll_id;
 		if (cmd->data) {
-			if (evdi_copy_to_user_allow_partial(cmd->data, &sw, sizeof(sw)))
-				return -EFAULT;
+			memset(&swu, 0, sizeof(swu));
+			memset(&sw_legacy, 0, sizeof(sw_legacy));
+			syncfile = NULL;
+			swu.id = sw.id;
+			swu.display_id = sw.display_id;
+			swu.acquire_fence_fd = -1;
+
+			syncfd = evdi_acquire_fence_take_export_syncfd(evdi,
+								      (u32)sw.display_id,
+								      (u32)sw.id,
+								      &syncfile);
+			if (syncfd >= 0 && syncfile)
+				swu.acquire_fence_fd = syncfd;
+			else if (syncfd >= 0) {
+				put_unused_fd(syncfd);
+				syncfd = -1;
+			}
+			if (copy_to_user(cmd->data, &swu, sizeof(swu))) {
+				if (syncfd >= 0) {
+					put_unused_fd(syncfd);
+					if (syncfile)
+						fput(syncfile);
+					syncfd = -1;
+					swu.acquire_fence_fd = -1;
+				}
+				sw_legacy.id = sw.id;
+				sw_legacy.display_id = sw.display_id;
+				if (copy_to_user(cmd->data, &sw_legacy, sizeof(sw_legacy)))
+					return -EFAULT;
+			}
+			if (syncfd >= 0)
+				fd_install(syncfd, syncfile);
 		}
 		EVDI_PERF_INC64(&evdi_perf.swap_delivered);
 		return 0;
@@ -991,12 +1056,29 @@ int evdi_ioctl_destroy_buff_callback(struct drm_device *dev, void *data, struct 
 	return 0;
 }
 
+int evdi_ioctl_set_acquire_fence(struct drm_device *dev, void *data, struct drm_file *file)
+{
+	struct evdi_device *evdi = dev->dev_private;
+	struct drm_evdi_set_acquire_fence *cmd = data;
+
+	if (unlikely(!evdi || !cmd))
+		return -EINVAL;
+	if (cmd->display_id >= LINDROID_MAX_CONNECTORS)
+		return -EINVAL;
+	if (cmd->id <= 0 ||  cmd->id > INT_MAX)
+		return -EINVAL;
+
+	evdi_acquire_fence_set_fd(evdi, cmd->display_id, (u32)cmd->id, cmd->acquire_fence_fd);
+	return 0;
+}
+
 int evdi_ioctl_swap_callback(struct drm_device *dev, void *data, struct drm_file *file)
 {
 	struct evdi_device *evdi = dev->dev_private;
 
 	struct drm_evdi_swap_callback *cb = data;
-	int d;
+	int d, pending;
+	u32 bufid;
 
 	if (unlikely(!evdi || !cb))
 		return -EINVAL;
@@ -1007,8 +1089,17 @@ int evdi_ioctl_swap_callback(struct drm_device *dev, void *data, struct drm_file
 		if (atomic_read(&evdi->swap_pending_pollid[d]) != cb->poll_id)
 			continue;
 
+		if (cb->release_fence_fd >= 0) {
+			pending = atomic_read(&evdi->swap_pending_bufid[d]);
+			if (pending > 0 && pending <= INT_MAX) {
+				bufid = (u32)pending;
+				evdi_release_fence_set_fd(evdi, bufid, cb->release_fence_fd);
+			}
+		}
+
 		atomic_set(&evdi->swap_pending_pollid[d], 0);
 		atomic_set(&evdi->swap_pending[d], 0);
+		atomic_set(&evdi->swap_pending_bufid[d], 0);
 		wake_up_interruptible(&evdi->swap_ack_waitq);
 		break;
 	}
@@ -1052,10 +1143,17 @@ int evdi_ioctl_gbm_del_buff(struct drm_device *dev, void *data, struct drm_file 
 	struct drm_evdi_gbm_del_buff *cmd = data;
 	long ret;
 
-	ret = evdi_queue_destroy_event(evdi, cmd->id, file);
-	if (!ret)
-		evdi_file_untrack_buffer(file, cmd->id);
+	if (unlikely(!evdi || !cmd))
+		return -EINVAL;
 
+	ret = evdi_queue_destroy_event(evdi, cmd->id, file);
+	if (!ret) {
+		if (cmd->id > 0 && cmd->id <= INT_MAX) {
+			evdi_acquire_fence_drop_all(evdi, (u32)cmd->id);
+			evdi_release_fence_drop(evdi, (u32)cmd->id);
+		}
+		evdi_file_untrack_buffer(file, cmd->id);
+	}
 	return ret;
 }
 
@@ -1085,6 +1183,8 @@ int evdi_queue_swap_event(struct evdi_device *evdi,
 
 	if (unlikely(!evdi))
 		return -EINVAL;
+	if (unlikely(id <= 0 || id > INT_MAX))
+		return -EINVAL;
 	if (unlikely(display_id < 0 || display_id >= LINDROID_MAX_CONNECTORS))
 		return -EINVAL;
 	if (unlikely(atomic_read(&evdi->events.stopping)))
@@ -1108,6 +1208,7 @@ int evdi_queue_swap_event(struct evdi_device *evdi,
 	poll_id = atomic_inc_return(&evdi->events.next_poll_id);
 
 	atomic_set(&evdi->swap_pending_pollid[display_id], poll_id);
+	atomic_set(&evdi->swap_pending_bufid[display_id], id);
 
 	atomic64_inc(&mb->seq); // odd
 	WRITE_ONCE(mb->owner, owner);
