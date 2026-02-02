@@ -367,6 +367,36 @@ void evdi_acquire_fence_set_fd(struct evdi_device *evdi, u32 display_id, u32 buf
 }
 
 /*
+ * Direct update from kerne takes a reference to fencel.
+ */
+void evdi_acquire_fence_update(struct evdi_device *evdi, u32 display_id, u32 bufid,
+			      struct dma_fence *fence)
+{
+	if (!evdi)
+		return;
+	if (display_id >= LINDROID_MAX_CONNECTORS)
+		return;
+	if (!evdi_bufid_valid_u32(bufid))
+		return;
+
+	if (fence)
+		dma_fence_get(fence);
+	else
+		return;
+
+	mutex_lock(&evdi->fence_mutex);
+
+#ifdef EVDI_HAVE_XARRAY
+	evdi_xa_store_fence(&evdi->acquire_fence_xa[display_id], bufid, fence);
+#else
+	evdi_idr_store_fence(&evdi->acquire_fence_idr[display_id],
+		     &evdi->acquire_fence_lock[display_id], bufid, fence);
+#endif
+
+	mutex_unlock(&evdi->fence_mutex);
+}
+
+/*
  * Consume acquire fence for (display_id, bufid), export as syncfd.
  * On success returns reserved fd and *out_file set to be fd_installed.
  */

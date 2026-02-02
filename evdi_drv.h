@@ -380,6 +380,7 @@ void evdi_connector_cleanup(struct evdi_device *evdi);
 void evdi_fence_tables_init(struct evdi_device *evdi);
 void evdi_fence_tables_cleanup(struct evdi_device *evdi);
 void evdi_acquire_fence_set_fd(struct evdi_device *evdi, u32 display_id, u32 bufid, int acquire_fence_fd);
+void evdi_acquire_fence_update(struct evdi_device *evdi, u32 display_id, u32 bufid, struct dma_fence *fence);
 int evdi_acquire_fence_take_export_syncfd(struct evdi_device *evdi, u32 display_id, u32 bufid, struct file **out_file);
 void evdi_release_fence_set_fd(struct evdi_device *evdi, u32 bufid, int release_fence_fd);
 void evdi_fence_tables_reset(struct evdi_device *evdi);
