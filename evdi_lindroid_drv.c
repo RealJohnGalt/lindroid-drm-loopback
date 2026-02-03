@@ -197,6 +197,8 @@ int evdi_device_init(struct evdi_device *evdi, struct platform_device *pdev)
 		atomic_set(&evdi->swap_pending[i], 0);
 		atomic_set(&evdi->swap_pending_pollid[i], 0);
 		atomic_set(&evdi->swap_pending_bufid[i], 0);
+		atomic_set(&evdi->swap_release_ready[i], 0);
+		evdi->swap_release_fence[i] = NULL;
 	}
 	
 #ifdef EVDI_HAVE_XARRAY
@@ -277,6 +279,8 @@ void evdi_device_cleanup(struct evdi_device *evdi)
 #endif
 
 	evdi_smp_wmb();
+
+	wake_up_all(&evdi->swap_ack_waitq);
 
 	evdi_fence_tables_cleanup(evdi);
 

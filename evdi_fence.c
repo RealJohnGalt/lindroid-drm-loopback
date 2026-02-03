@@ -255,13 +255,9 @@ void evdi_fence_tables_init(struct evdi_device *evdi)
 
 	mutex_lock(&evdi->fence_mutex);
 #ifdef EVDI_HAVE_XARRAY
-	xa_init(&evdi->release_fence_xa);
 	for (d = 0; d < LINDROID_MAX_CONNECTORS; d++)
 		xa_init(&evdi->acquire_fence_xa[d]);
 #else
-	idr_init(&evdi->release_fence_idr);
-	spin_lock_init(&evdi->release_fence_lock);
-
 	for (d = 0; d < LINDROID_MAX_CONNECTORS; d++) {
 		idr_init(&evdi->acquire_fence_idr[d]);
 		spin_lock_init(&evdi->acquire_fence_lock[d]);
@@ -273,34 +269,41 @@ void evdi_fence_tables_init(struct evdi_device *evdi)
 void evdi_fence_tables_reset(struct evdi_device *evdi)
 {
 	int d;
+	struct dma_fence *old[LINDROID_MAX_CONNECTORS] = {0};
 
 	if (!evdi)
 		return;
 
 	mutex_lock(&evdi->fence_mutex);
 
+	for (d = 0; d < LINDROID_MAX_CONNECTORS; d++) {
+		old[d] = evdi->swap_release_fence[d];
+		evdi->swap_release_fence[d] = NULL;
+		atomic_set(&evdi->swap_release_ready[d], 0);
+	}
+
 #ifdef EVDI_HAVE_XARRAY
-	evdi_xa_purge_fences(&evdi->release_fence_xa);
 	for (d = 0; d < LINDROID_MAX_CONNECTORS; d++)
 		evdi_xa_purge_fences(&evdi->acquire_fence_xa[d]);
-	xa_init(&evdi->release_fence_xa);
 	for (d = 0; d < LINDROID_MAX_CONNECTORS; d++)
 		xa_init(&evdi->acquire_fence_xa[d]);
 #else
-	evdi_idr_purge_fences(&evdi->release_fence_idr, &evdi->release_fence_lock);
 	for (d = 0; d < LINDROID_MAX_CONNECTORS; d++)
 		evdi_idr_purge_fences(&evdi->acquire_fence_idr[d], &evdi->acquire_fence_lock[d]);
-	idr_init(&evdi->release_fence_idr);
 	for (d = 0; d < LINDROID_MAX_CONNECTORS; d++)
 		idr_init(&evdi->acquire_fence_idr[d]);
 #endif
 
 	mutex_unlock(&evdi->fence_mutex);
+
+	for (d = 0; d < LINDROID_MAX_CONNECTORS; d++)
+		if (old[d]) dma_fence_put(old[d]);
 }
 
 void evdi_fence_tables_cleanup(struct evdi_device *evdi)
 {
 	int d;
+	struct dma_fence *old[LINDROID_MAX_CONNECTORS] = {0};
 
 	d = 0;
 
@@ -309,15 +312,20 @@ void evdi_fence_tables_cleanup(struct evdi_device *evdi)
 
 	mutex_lock(&evdi->fence_mutex);
 #ifdef EVDI_HAVE_XARRAY
-	evdi_xa_purge_fences(&evdi->release_fence_xa);
 	for (d = 0; d < LINDROID_MAX_CONNECTORS; d++)
 		evdi_xa_purge_fences(&evdi->acquire_fence_xa[d]);
 #else
-	evdi_idr_purge_fences(&evdi->release_fence_idr, &evdi->release_fence_lock);
 	for (d = 0; d < LINDROID_MAX_CONNECTORS; d++)
 		evdi_idr_purge_fences(&evdi->acquire_fence_idr[d], &evdi->acquire_fence_lock[d]);
 #endif
+	for (d = 0; d < LINDROID_MAX_CONNECTORS; d++) {
+		old[d] = evdi->swap_release_fence[d];
+		evdi->swap_release_fence[d] = NULL;
+		atomic_set(&evdi->swap_release_ready[d], 0);
+	}
 	mutex_unlock(&evdi->fence_mutex);
+	for (d = 0; d < LINDROID_MAX_CONNECTORS; d++)
+		if (old[d]) dma_fence_put(old[d]);
 }
 
 void evdi_acquire_fence_set_fd(struct evdi_device *evdi, u32 display_id, u32 bufid,
@@ -476,51 +484,64 @@ void evdi_acquire_fence_drop_all(struct evdi_device *evdi, u32 bufid)
 		evdi_acquire_fence_drop(evdi, d, bufid);
 }
 
-void evdi_release_fence_set_fd(struct evdi_device *evdi, u32 bufid, int release_fence_fd)
+void evdi_swap_release_fence_set_fd(struct evdi_device *evdi, u32 display_id, int release_fence_fd)
 {
-	struct dma_fence *f;
+	struct dma_fence *f = NULL;
+	struct dma_fence *old = NULL;
 
 	f = NULL;
 
 	if (!evdi)
 		return;
-	if (!bufid)
-		return;
-	if (release_fence_fd < 0)
+	if (display_id >= LINDROID_MAX_CONNECTORS)
 		return;
 
-	f = evdi_fence_from_syncfd(release_fence_fd);
-	if (!f)
-		return;
+	if (release_fence_fd >= 0)
+		f = evdi_fence_from_syncfd(release_fence_fd);
 
 	mutex_lock(&evdi->fence_mutex);
-#ifdef EVDI_HAVE_XARRAY
-	evdi_xa_store_fence(&evdi->release_fence_xa, bufid, f);
-#else
-	evdi_idr_store_fence(&evdi->release_fence_idr, &evdi->release_fence_lock, bufid, f);
-#endif
+	old = evdi->swap_release_fence[display_id];
+	evdi->swap_release_fence[display_id] = f;
 	mutex_unlock(&evdi->fence_mutex);
+
+	if (old)
+		dma_fence_put(old);
+	evdi_smp_wmb();
+	atomic_set(&evdi->swap_release_ready[display_id], 1);
 }
 
-void evdi_release_fence_drop(struct evdi_device *evdi, u32 bufid)
+struct dma_fence *evdi_swap_release_fence_get(struct evdi_device *evdi, u32 display_id)
 {
-	struct dma_fence *f;
+	struct dma_fence *f = NULL;
 
 	if (!evdi)
+		return NULL;
+
+	if (display_id >= LINDROID_MAX_CONNECTORS)
+		return NULL;
+
+	mutex_lock(&evdi->fence_mutex);
+	f = evdi->swap_release_fence[display_id];
+	if (f)
+		dma_fence_get(f);
+	mutex_unlock(&evdi->fence_mutex);
+
+	return f;
+}
+
+void evdi_swap_release_fence_clear(struct evdi_device *evdi, u32 display_id)
+{
+	struct dma_fence *old = NULL;
+	if (!evdi)
 		return;
-	if (!evdi_bufid_valid_u32(bufid))
+	if (display_id >= LINDROID_MAX_CONNECTORS)
 		return;
 
 	mutex_lock(&evdi->fence_mutex);
-#ifdef EVDI_HAVE_XARRAY
-	f = evdi_xa_erase_fence(&evdi->release_fence_xa, bufid);
-#else
-	f = evdi_idr_erase_fence(&evdi->release_fence_idr,
-				 &evdi->release_fence_lock,
-				 bufid);
-#endif
+	old = evdi->swap_release_fence[display_id];
+	evdi->swap_release_fence[display_id] = NULL;
 	mutex_unlock(&evdi->fence_mutex);
-
-	if (f)
-		dma_fence_put(f);
+	if (old)
+		dma_fence_put(old);
+	atomic_set(&evdi->swap_release_ready[display_id], 0);
 }

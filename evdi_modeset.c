@@ -13,7 +13,6 @@
 #include <drm/drm_gem_framebuffer_helper.h>
 #include <drm/drm_atomic_helper.h>
 #include <linux/dma-fence.h>
-#include <linux/dma-resv.h>
 
 static const struct drm_mode_config_funcs evdi_mode_config_funcs = {
 	.fb_create	= evdi_fb_user_fb_create,
@@ -47,20 +46,6 @@ static void evdi_pipe_disable(struct drm_simple_display_pipe *pipe)
 #endif
 }
 
-static inline struct dma_fence *evdi_dma_resv_get_excl(struct dma_resv *obj)
-{
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 0)
-	struct dma_resv_iter cursor;
-	struct dma_fence *f;
-
-	dma_resv_iter_begin(&cursor, obj, DMA_RESV_USAGE_WRITE);
-	f = dma_resv_iter_first(&cursor);
-	return f;
-#else
-	return dma_resv_get_excl(obj);
-#endif
-}
-
 static void evdi_pipe_update(struct drm_simple_display_pipe *pipe,
 			     struct drm_plane_state *old_state)
 {
@@ -68,10 +53,8 @@ static void evdi_pipe_update(struct drm_simple_display_pipe *pipe,
 	struct drm_framebuffer *fb = state ? state->fb : NULL;
 	struct evdi_device *evdi = pipe->plane.dev->dev_private;
 	struct evdi_framebuffer *efb;
-	struct dma_fence *fence;
+	struct dma_fence *rf;
 	int slot;
-	unsigned long timeout;
-	long w;
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 19, 0)
 	struct drm_pending_vblank_event *vblank_ev;
 	struct drm_device *ddev;
@@ -93,38 +76,30 @@ static void evdi_pipe_update(struct drm_simple_display_pipe *pipe,
 
 	slot = evdi_connector_slot(evdi, pipe->connector);
 
-	/* Backpressure: wait for userspace to ACK the previous swap */
-	//TODO: maybe remove timeout?
-	timeout = msecs_to_jiffies(250);
 	if (atomic_read(&evdi->swap_pending[slot])) {
-		w = wait_event_interruptible_timeout(
-			evdi->swap_ack_waitq,
-			!atomic_read(&evdi->swap_pending[slot]) ||
-				atomic_read(&evdi->events.stopping) ||
-				!READ_ONCE(evdi->drm_client),
-			timeout);
+		if (atomic_read(&evdi->events.stopping) || !READ_ONCE(evdi->drm_client))
+			goto out;
 
-		if (w == 0) {
-			/* Drop backpressure to avoid stalls. */
-			atomic_set(&evdi->swap_pending_pollid[slot], 0);
-			atomic_set(&evdi->swap_pending[slot], 0);
-			atomic_set(&evdi->swap_pending_bufid[slot], 0);
+		if (!atomic_read(&evdi->swap_release_ready[slot]))
+			goto out;
+
+		rf = evdi_swap_release_fence_get(evdi, (u32)slot);
+		if (rf) {
+			if (!dma_fence_is_signaled(rf)) {
+				dma_fence_put(rf);
+				goto out;
+			}
+			dma_fence_put(rf);
 		}
+
+		evdi_swap_release_fence_clear(evdi, (u32)slot);
+		atomic_set(&evdi->swap_pending_pollid[slot], 0);
+		atomic_set(&evdi->swap_pending[slot], 0);
+		atomic_set(&evdi->swap_pending_bufid[slot], 0);
 	}
 
 	efb = to_evdi_fb(fb);
 
-	if (efb && efb->gralloc_buf_id > 0 && efb->gralloc_buf_id <= INT_MAX) {
-		fence = pipe->plane.state->fence;
-		if (!fence && efb->obj) {
-			/* Fallback: implicit Sync */
-			dma_resv_lock(efb->obj->base.resv, NULL);
-			fence = evdi_dma_resv_get_excl(efb->obj->base.resv);
-			dma_resv_unlock(efb->obj->base.resv);
-		}
-		if (fence)
-			evdi_acquire_fence_update(evdi, slot, efb->gralloc_buf_id, fence);
-	}
 	if (efb && efb->owner && efb->gralloc_buf_id > 0 && efb->gralloc_buf_id <= INT_MAX) {
 		evdi_queue_swap_event(evdi,
 				      efb->gralloc_buf_id,
@@ -132,6 +107,7 @@ static void evdi_pipe_update(struct drm_simple_display_pipe *pipe,
 				      efb->owner);
 	}
 
+out:
 	if (unlikely(!READ_ONCE(evdi->drm_client)))
 		return;
 }

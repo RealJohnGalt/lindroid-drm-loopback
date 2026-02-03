@@ -400,12 +400,25 @@ int evdi_ioctl_connect(struct drm_device *dev, void *data, struct drm_file *file
 {
 	struct evdi_device *evdi = dev->dev_private;
 	struct drm_evdi_connect *cmd = data;
+	int d;
 
 	EVDI_PERF_INC64(&evdi_perf.ioctl_calls[0]);
 
 	if (!cmd->connected) {
-		if (cmd->display_id >= LINDROID_MAX_CONNECTORS)
+		d = (int)cmd->display_id;
+		if (d >= LINDROID_MAX_CONNECTORS)
 			return -EINVAL;
+		if (d >= 0 && d < LINDROID_MAX_CONNECTORS) {
+			int bufid = atomic_read(&evdi->swap_pending_bufid[d]);
+			atomic_set(&evdi->swap_pending_pollid[d], 0);
+			atomic_set(&evdi->swap_pending[d], 0);
+			atomic_set(&evdi->swap_pending_bufid[d], 0);
+			evdi_smp_wmb();
+			wake_up_interruptible_all(&evdi->swap_ack_waitq);
+			if (bufid > 0 && bufid <= INT_MAX)
+				evdi_acquire_fence_drop_all(evdi, (u32)bufid);
+			evdi_swap_release_fence_clear(evdi, (u32)d);
+		}
 		evdi_flush_work(evdi);
 		mutex_lock(&evdi->config_mutex);
 		evdi->displays[cmd->display_id].connected = false;
@@ -1077,8 +1090,7 @@ int evdi_ioctl_swap_callback(struct drm_device *dev, void *data, struct drm_file
 	struct evdi_device *evdi = dev->dev_private;
 
 	struct drm_evdi_swap_callback *cb = data;
-	int d, pending;
-	u32 bufid;
+	int d;
 
 	if (unlikely(!evdi || !cb))
 		return -EINVAL;
@@ -1089,17 +1101,7 @@ int evdi_ioctl_swap_callback(struct drm_device *dev, void *data, struct drm_file
 		if (atomic_read(&evdi->swap_pending_pollid[d]) != cb->poll_id)
 			continue;
 
-		if (cb->release_fence_fd >= 0) {
-			pending = atomic_read(&evdi->swap_pending_bufid[d]);
-			if (pending > 0 && pending <= INT_MAX) {
-				bufid = (u32)pending;
-				evdi_release_fence_set_fd(evdi, bufid, cb->release_fence_fd);
-			}
-		}
-
-		atomic_set(&evdi->swap_pending_pollid[d], 0);
-		atomic_set(&evdi->swap_pending[d], 0);
-		atomic_set(&evdi->swap_pending_bufid[d], 0);
+		evdi_swap_release_fence_set_fd(evdi, (u32)d, cb->release_fence_fd);
 		wake_up_interruptible(&evdi->swap_ack_waitq);
 		break;
 	}
@@ -1150,7 +1152,6 @@ int evdi_ioctl_gbm_del_buff(struct drm_device *dev, void *data, struct drm_file 
 	if (!ret) {
 		if (cmd->id > 0 && cmd->id <= INT_MAX) {
 			evdi_acquire_fence_drop_all(evdi, (u32)cmd->id);
-			evdi_release_fence_drop(evdi, (u32)cmd->id);
 		}
 		evdi_file_untrack_buffer(file, cmd->id);
 	}
@@ -1194,12 +1195,15 @@ int evdi_queue_swap_event(struct evdi_device *evdi,
 	if (atomic_cmpxchg(&evdi->swap_pending[display_id], 0, 1) != 0)
 		return -EBUSY;
 
+	evdi_swap_release_fence_clear(evdi, (u32)display_id);
+
 	client = READ_ONCE(evdi->drm_client);
 	if (client)
 		owner = client;
 
 	if (unlikely(!owner)) {
 		atomic_set(&evdi->swap_pending[display_id], 0);
+		evdi_swap_release_fence_clear(evdi, (u32)display_id);
 		return -ENODEV;
 	}
 

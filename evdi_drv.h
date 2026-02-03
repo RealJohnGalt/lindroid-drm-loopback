@@ -280,6 +280,8 @@ struct evdi_file_priv {
 	u8 swap_rr;
 };
 
+struct dma_fence;
+
 struct evdi_device {
 	struct drm_device *ddev;
 	struct drm_connector *connector[LINDROID_MAX_CONNECTORS];
@@ -319,6 +321,9 @@ struct evdi_device {
 	atomic_t swap_pending_pollid[LINDROID_MAX_CONNECTORS];
 	atomic_t swap_pending_bufid[LINDROID_MAX_CONNECTORS];
 
+	atomic_t swap_release_ready[LINDROID_MAX_CONNECTORS];
+	struct dma_fence *swap_release_fence[LINDROID_MAX_CONNECTORS];
+
 	struct mutex config_mutex;
 	struct mutex fence_mutex;
 
@@ -329,7 +334,6 @@ struct evdi_device {
 	struct xarray inflight_xa;
 	u32 inflight_next_id;
 	struct xarray acquire_fence_xa[LINDROID_MAX_CONNECTORS];
-	struct xarray release_fence_xa;
 #else
 	struct idr file_idr;
 	spinlock_t file_lock;
@@ -337,8 +341,6 @@ struct evdi_device {
 	spinlock_t inflight_lock;
 	struct idr acquire_fence_idr[LINDROID_MAX_CONNECTORS];
 	spinlock_t acquire_fence_lock[LINDROID_MAX_CONNECTORS];
-	struct idr release_fence_idr;
-	spinlock_t release_fence_lock;
 #endif
 	struct evdi_percpu_inflight __percpu	*percpu_inflight;
 };
@@ -382,10 +384,11 @@ void evdi_fence_tables_cleanup(struct evdi_device *evdi);
 void evdi_acquire_fence_set_fd(struct evdi_device *evdi, u32 display_id, u32 bufid, int acquire_fence_fd);
 void evdi_acquire_fence_update(struct evdi_device *evdi, u32 display_id, u32 bufid, struct dma_fence *fence);
 int evdi_acquire_fence_take_export_syncfd(struct evdi_device *evdi, u32 display_id, u32 bufid, struct file **out_file);
-void evdi_release_fence_set_fd(struct evdi_device *evdi, u32 bufid, int release_fence_fd);
 void evdi_fence_tables_reset(struct evdi_device *evdi);
 void evdi_acquire_fence_drop_all(struct evdi_device *evdi, u32 bufid);
-void evdi_release_fence_drop(struct evdi_device *evdi, u32 bufid);
+void evdi_swap_release_fence_set_fd(struct evdi_device *evdi, u32 display_id, int release_fence_fd);
+struct dma_fence *evdi_swap_release_fence_get(struct evdi_device *evdi, u32 display_id);
+void evdi_swap_release_fence_clear(struct evdi_device *evdi, u32 display_id);
 
 /* evdi_ioctl.c */
 int evdi_ioctl_connect(struct drm_device *dev, void *data, struct drm_file *file);
