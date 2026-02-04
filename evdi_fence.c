@@ -361,6 +361,8 @@ void evdi_acquire_fence_set_fd(struct evdi_device *evdi, u32 display_id, u32 buf
 	/* Set/replace */
 	f = evdi_fence_from_syncfd(acquire_fence_fd);
 	if (!f) {
+		evdi_err("evdi: acquire fence import failed: display=%u bufid=%u fd=%d\n",
+		        display_id, bufid, acquire_fence_fd);
 		mutex_unlock(&evdi->fence_mutex);
 		return;
 	}
