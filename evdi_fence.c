@@ -406,6 +406,41 @@ void evdi_acquire_fence_update(struct evdi_device *evdi, u32 display_id, u32 buf
 	mutex_unlock(&evdi->fence_mutex);
 }
 
+static struct dma_fence *evdi_acquire_fence_erase_any_locked(struct evdi_device *evdi,
+							    u32 display_id, u32 bufid)
+{
+	struct dma_fence *f = NULL;
+	u32 d;
+
+	if (!evdi)
+		return NULL;
+
+	if (display_id < LINDROID_MAX_CONNECTORS) {
+#ifdef EVDI_HAVE_XARRAY
+		f = evdi_xa_erase_fence(&evdi->acquire_fence_xa[display_id], bufid);
+#else
+		f = evdi_idr_erase_fence(&evdi->acquire_fence_idr[display_id],
+					 &evdi->acquire_fence_lock[display_id], bufid);
+#endif
+		if (f)
+			return f;
+	}
+
+	for (d = 0; d < LINDROID_MAX_CONNECTORS; d++) {
+		if (d == display_id)
+			continue;
+#ifdef EVDI_HAVE_XARRAY
+		f = evdi_xa_erase_fence(&evdi->acquire_fence_xa[d], bufid);
+#else
+		f = evdi_idr_erase_fence(&evdi->acquire_fence_idr[d],
+					 &evdi->acquire_fence_lock[d], bufid);
+#endif
+		if (f)
+			return f;
+	}
+	return NULL;
+}
+
 /*
  * Consume acquire fence for (display_id, bufid), export as syncfd.
  * On success returns reserved fd and *out_file set to be fd_installed.
@@ -431,12 +466,7 @@ int evdi_acquire_fence_take_export_syncfd(struct evdi_device *evdi, u32 display_
 		return -EINVAL;
 
 	mutex_lock(&evdi->fence_mutex);
-#ifdef EVDI_HAVE_XARRAY
-	f = evdi_xa_erase_fence(&evdi->acquire_fence_xa[display_id], bufid);
-#else
-	f = evdi_idr_erase_fence(&evdi->acquire_fence_idr[display_id],
-				 &evdi->acquire_fence_lock[display_id], bufid);
-#endif
+	f = evdi_acquire_fence_erase_any_locked(evdi, display_id, bufid);
 	if (!f) {
 		mutex_unlock(&evdi->fence_mutex);
 		return -1;
