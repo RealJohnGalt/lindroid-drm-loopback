@@ -691,10 +691,6 @@ static __always_inline int evdi_ioctl_poll_try_swap(struct evdi_device *evdi,
 {
 	struct evdi_swap sw;
 	struct drm_evdi_swap_event swu;
-	struct {
-		int id;
-		int display_id;
-	} sw_legacy;
 	struct file *sync_file = NULL;
 	int sync_fd = -1;
 	int poll_id = 0;
@@ -711,14 +707,10 @@ static __always_inline int evdi_ioctl_poll_try_swap(struct evdi_device *evdi,
 	}
 
 	memset(&swu, 0, sizeof(swu));
-	memset(&sw_legacy, 0, sizeof(sw_legacy));
 
 	swu.id = sw.id;
 	swu.display_id = sw.display_id;
 	swu.acquire_fence_fd = -1;
-
-	sw_legacy.id = sw.id;
-	sw_legacy.display_id = sw.display_id;
 
 	sync_fd = evdi_export_acquire_fence_for_swap(evdi, file,
 						    (u32)sw.display_id,
@@ -742,17 +734,6 @@ static __always_inline int evdi_ioctl_poll_try_swap(struct evdi_device *evdi,
 		if (sync_file)
 			fput(sync_file);
 
-		swu.acquire_fence_fd = -1;
-		if (copy_to_user(cmd->data, &sw_legacy, sizeof(sw_legacy)))
-			return -EFAULT;
-		return -EFAULT;
-	}
-
-	if (copy_to_user(cmd->data, &sw_legacy, sizeof(sw_legacy))) {
-		if (sync_fd >= 0)
-			put_unused_fd(sync_fd);
-		if (sync_file)
-			fput(sync_file);
 		return -EFAULT;
 	}
 
