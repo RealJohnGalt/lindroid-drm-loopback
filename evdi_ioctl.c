@@ -1369,13 +1369,35 @@ static int evdi_queue_int_event(struct evdi_device *evdi,
 	return 0;
 }
 
+static __always_inline int evdi_swap_id_to_bufid(struct drm_file *fb_owner,
+						 int id,
+						 u32 *out_bufid)
+{
+	u32 tmp = 0;
+
+	if (!out_bufid)
+		return -EINVAL;
+	*out_bufid = 0;
+
+	if (!fb_owner || id <= 0 || id > INT_MAX)
+		return -EINVAL;
+
+	if (!evdi_file_handle_to_bufid(fb_owner, (u32)id, &tmp) && tmp) {
+		*out_bufid = tmp;
+		return 0;
+	}
+	return -ENOENT;
+}
+
 int evdi_queue_swap_event(struct evdi_device *evdi,
 	int id, int display_id, struct drm_file *owner)
 {
 	struct evdi_swap_mailbox *mb;
+	struct drm_file *fb_owner;
 	struct drm_file *client;
 	u64 payload;
 	int poll_id;
+	u32 bufid = (u32)id;
 
 	if (unlikely(!evdi))
 		return -EINVAL;
@@ -1392,6 +1414,15 @@ int evdi_queue_swap_event(struct evdi_device *evdi,
 
 	evdi_swap_release_fence_clear(evdi, (u32)display_id);
 
+	/* Preserve owner before we retarget client */
+	fb_owner = owner;
+	if (fb_owner) {
+		u32 xlat = 0;
+		if (!evdi_swap_id_to_bufid(fb_owner, id, &xlat) && xlat) {
+			bufid = xlat;
+		}
+	}
+
 	client = READ_ONCE(evdi->drm_client);
 	if (client)
 		owner = client;
@@ -1403,11 +1434,11 @@ int evdi_queue_swap_event(struct evdi_device *evdi,
 	}
 
 	mb = &evdi->swap_mailbox[display_id];
-	payload = evdi_swap_pack(id, display_id);
+	payload = evdi_swap_pack((int)bufid, display_id);
 	poll_id = atomic_inc_return(&evdi->events.next_poll_id);
 
 	atomic_set(&evdi->swap_pending_pollid[display_id], poll_id);
-	atomic_set(&evdi->swap_pending_bufid[display_id], id);
+	atomic_set(&evdi->swap_pending_bufid[display_id], (int)bufid);
 
 	atomic64_inc(&mb->seq); // odd
 	WRITE_ONCE(mb->owner, owner);
