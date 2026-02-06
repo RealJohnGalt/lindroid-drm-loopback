@@ -140,6 +140,11 @@ static __always_inline int evdi_export_acquire_fence_for_swap(struct evdi_device
 			return fd;
 	}
 
+	/* fallback for non deterministic swap ids matching one pending swap per display */
+	fd = evdi_pending_acquire_fence_take_export_syncfd(evdi, display_id, out_file);
+	if (fd != -1)
+		return fd;
+
 	return -1;
 }
 
@@ -1282,6 +1287,9 @@ int evdi_ioctl_set_acquire_fence(struct drm_device *dev, void *data, struct drm_
 		evdi_acquire_fence_set_fd(evdi, cmd->display_id, bufid_to_handle, cmd->acquire_fence_fd);
 	if (handle_to_bufid && handle_to_bufid != id_key && handle_to_bufid != bufid_to_handle)
 		evdi_acquire_fence_set_fd(evdi, cmd->display_id, handle_to_bufid, cmd->acquire_fence_fd);
+
+	/* update fallback pending fence */
+	evdi_pending_acquire_fence_set_fd(evdi, cmd->display_id, cmd->acquire_fence_fd);
 	return 0;
 }
 

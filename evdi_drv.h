@@ -321,6 +321,7 @@ struct evdi_device {
 
 	atomic_t swap_release_ready[LINDROID_MAX_CONNECTORS];
 	struct dma_fence *swap_release_fence[LINDROID_MAX_CONNECTORS];
+	struct dma_fence *pending_acquire_fence[LINDROID_MAX_CONNECTORS];
 
 	struct mutex config_mutex;
 	struct mutex fence_mutex;
@@ -387,6 +388,10 @@ void evdi_acquire_fence_drop_all(struct evdi_device *evdi, u32 bufid);
 void evdi_swap_release_fence_set_fd(struct evdi_device *evdi, u32 display_id, int release_fence_fd);
 struct dma_fence *evdi_swap_release_fence_get(struct evdi_device *evdi, u32 display_id);
 void evdi_swap_release_fence_clear(struct evdi_device *evdi, u32 display_id);
+void evdi_pending_acquire_fence_set_fd(struct evdi_device *evdi, u32 displayid,
+				       int acquire_fence_fd);
+int evdi_pending_acquire_fence_take_export_syncfd(struct evdi_device *evdi, u32 displayid,
+						  struct file **out_file);
 
 /* evdi_ioctl.c */
 int evdi_ioctl_connect(struct drm_device *dev, void *data, struct drm_file *file);
