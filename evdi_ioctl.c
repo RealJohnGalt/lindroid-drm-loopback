@@ -1268,12 +1268,12 @@ int evdi_ioctl_set_acquire_fence(struct drm_device *dev, void *data, struct drm_
 	(void)evdi_file_bufid_to_handle(file, id_key, &xlat_key);
 
 	if (xlat_key && xlat_key != id_key) {
-		evdi_debug("evdi: set_acquire_fence display=%u id=%d keys={%u,%u} fd=%d\n",
+		evdi_err("evdi: set_acquire_fence display=%u id=%d keys={%u,%u} fd=%d\n",
 			   cmd->display_id, cmd->id, id_key, xlat_key, cmd->acquire_fence_fd);
 		evdi_acquire_fence_set_fd(evdi, cmd->display_id, id_key, cmd->acquire_fence_fd);
 		evdi_acquire_fence_set_fd(evdi, cmd->display_id, xlat_key, cmd->acquire_fence_fd);
 	} else {
-		evdi_debug("evdi: set_acquire_fence display=%u id=%d key=%u fd=%d\n",
+		evdi_err("evdi: set_acquire_fence display=%u id=%d key=%u fd=%d\n",
 			   cmd->display_id, cmd->id, id_key, cmd->acquire_fence_fd);
 		evdi_acquire_fence_set_fd(evdi, cmd->display_id, id_key, cmd->acquire_fence_fd);
 	}
