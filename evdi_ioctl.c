@@ -1255,7 +1255,8 @@ int evdi_ioctl_set_acquire_fence(struct drm_device *dev, void *data, struct drm_
 	struct evdi_device *evdi = dev->dev_private;
 	struct drm_evdi_set_acquire_fence *cmd = data;
 	u32 id_key;
-	u32 xlat_key = 0;
+	u32 bufid_to_handle = 0;
+	u32 handle_to_bufid = 0;
 
 	if (unlikely(!evdi || !cmd))
 		return -EINVAL;
@@ -1265,18 +1266,22 @@ int evdi_ioctl_set_acquire_fence(struct drm_device *dev, void *data, struct drm_
 		return -EINVAL;
 
 	id_key = (u32)cmd->id;
-	(void)evdi_file_bufid_to_handle(file, id_key, &xlat_key);
+	(void)evdi_file_bufid_to_handle(file, id_key, &bufid_to_handle);
+	(void)evdi_file_handle_to_bufid(file, id_key, &handle_to_bufid);
 
-	if (xlat_key && xlat_key != id_key) {
-		evdi_err("evdi: set_acquire_fence display=%u id=%d keys={%u,%u} fd=%d\n",
-			   cmd->display_id, cmd->id, id_key, xlat_key, cmd->acquire_fence_fd);
-		evdi_acquire_fence_set_fd(evdi, cmd->display_id, id_key, cmd->acquire_fence_fd);
-		evdi_acquire_fence_set_fd(evdi, cmd->display_id, xlat_key, cmd->acquire_fence_fd);
-	} else {
-		evdi_err("evdi: set_acquire_fence display=%u id=%d key=%u fd=%d\n",
-			   cmd->display_id, cmd->id, id_key, cmd->acquire_fence_fd);
-		evdi_acquire_fence_set_fd(evdi, cmd->display_id, id_key, cmd->acquire_fence_fd);
-	}
+	//XXX TODO: change back to evdi_debug during squash/cleanup
+	evdi_err("evdi: set_acquire_fence display=%u id=%d key=%u b2h=%u h2b=%u fd=%d\n",
+		   cmd->display_id, cmd->id, id_key,
+		   bufid_to_handle, handle_to_bufid,
+		   cmd->acquire_fence_fd);
+
+	/* Always store for the provided key and then translated keys */
+	evdi_acquire_fence_set_fd(evdi, cmd->display_id, id_key, cmd->acquire_fence_fd);
+
+	if (bufid_to_handle && bufid_to_handle != id_key)
+		evdi_acquire_fence_set_fd(evdi, cmd->display_id, bufid_to_handle, cmd->acquire_fence_fd);
+	if (handle_to_bufid && handle_to_bufid != id_key && handle_to_bufid != bufid_to_handle)
+		evdi_acquire_fence_set_fd(evdi, cmd->display_id, handle_to_bufid, cmd->acquire_fence_fd);
 	return 0;
 }
 
