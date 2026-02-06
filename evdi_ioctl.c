@@ -28,6 +28,121 @@ struct evdi_gralloc_buf_stack {
 	int installed_fds[EVDI_MAX_FDS];
 };
 
+/* Fence key translation helpers */
+static __always_inline int evdi_file_bufid_to_handle(struct drm_file *file,
+						     u32 bufid, u32 *out_handle)
+{
+	struct evdi_file_priv *priv;
+
+	if (!out_handle)
+		return -EINVAL;
+	*out_handle = 0;
+
+	if (!file || !bufid)
+		return -EINVAL;
+
+	priv = file->driver_priv;
+	if (!priv)
+		return -EINVAL;
+
+	mutex_lock(&priv->lock);
+#ifdef EVDI_HAVE_XARRAY
+	{
+		void *entry = xa_load(&priv->bufid_to_handle, (unsigned long)bufid);
+		u32 h = entry ? (u32)xa_to_value(entry) : 0;
+		if (h)
+			*out_handle = h;
+		mutex_unlock(&priv->lock);
+		return h ? 0 : -ENOENT;
+	}
+#else
+	{
+		void *entry = idr_find(&priv->bufid_to_handle, (int)bufid);
+		u32 h = entry ? (u32)(unsigned long)entry : 0;
+		if (h)
+			*out_handle = h;
+		mutex_unlock(&priv->lock);
+		return h ? 0 : -ENOENT;
+	}
+#endif
+}
+
+static __always_inline int evdi_file_handle_to_bufid(struct drm_file *file,
+						     u32 handle, u32 *out_bufid)
+{
+	struct evdi_file_priv *priv;
+
+	if (!out_bufid)
+		return -EINVAL;
+	*out_bufid = 0;
+
+	if (!file || !handle)
+		return -EINVAL;
+
+	priv = file->driver_priv;
+	if (!priv)
+		return -EINVAL;
+
+	mutex_lock(&priv->lock);
+#ifdef EVDI_HAVE_XARRAY
+	{
+		void *entry = xa_load(&priv->handle_to_bufid, (unsigned long)handle);
+		u32 id = entry ? (u32)xa_to_value(entry) : 0;
+		if (id)
+			*out_bufid = id;
+		mutex_unlock(&priv->lock);
+		return id ? 0 : -ENOENT;
+	}
+#else
+	{
+		void *entry = idr_find(&priv->handle_to_bufid, (int)handle);
+		u32 id = entry ? (u32)(unsigned long)entry : 0;
+		if (id)
+			*out_bufid = id;
+		mutex_unlock(&priv->lock);
+		return id ? 0 : -ENOENT;
+	}
+#endif
+}
+
+/*
+ * Export acquire fence for a swap id, trying:
+ *  1) swap_id
+ *  2) translated handle->bufid(swap_id)
+ *  3) translated bufid->handle(swap_id)
+ */
+static __always_inline int evdi_export_acquire_fence_for_swap(struct evdi_device *evdi,
+							      struct drm_file *file,
+							      u32 display_id, u32 swap_id,
+							      struct file **out_file)
+{
+	int fd;
+	u32 alt = 0;
+
+	if (!out_file)
+		return -EINVAL;
+	*out_file = NULL;
+
+	fd = evdi_acquire_fence_take_export_syncfd(evdi, display_id, swap_id, out_file);
+	if (fd != -1)
+		return fd;
+
+	if (!evdi_file_handle_to_bufid(file, swap_id, &alt) && alt && alt != swap_id) {
+		fd = evdi_acquire_fence_take_export_syncfd(evdi, display_id, alt, out_file);
+		if (fd != -1)
+			return fd;
+	}
+
+	alt = 0;
+	if (!evdi_file_bufid_to_handle(file, swap_id, &alt) && alt && alt != swap_id) {
+		fd = evdi_acquire_fence_take_export_syncfd(evdi, display_id, alt, out_file);
+		if (fd != -1)
+			return fd;
+	}
+
+	return -1;
+}
+
 static inline int evdi_get_unused_fds_batch(int n, int flags, int *fds)
 {
 	int i, fd, ret = 0;
@@ -565,65 +680,101 @@ static __always_inline bool evdi_swap_dequeue_for_file(struct evdi_device *evdi,
 	return false;
 }
 
-int evdi_ioctl_poll(struct drm_device *dev, void *data, struct drm_file *file)
+static __always_inline int evdi_ioctl_poll_try_swap(struct evdi_device *evdi,
+						    struct drm_evdi_poll *cmd,
+						    struct drm_file *file)
 {
-	struct evdi_device *evdi = dev->dev_private;
-	struct drm_evdi_poll *cmd = data;
-	struct evdi_event *event;
 	struct evdi_swap sw;
 	struct drm_evdi_swap_event swu;
 	struct {
 		int id;
 		int display_id;
 	} sw_legacy;
-	struct file *syncfile;
+	struct file *sync_file = NULL;
+	int sync_fd = -1;
+	int poll_id = 0;
+
+	if (!evdi_swap_dequeue_for_file(evdi, file, &sw, &poll_id))
+		return 0;
+
+	cmd->event = swap_to;
+	cmd->poll_id = poll_id;
+
+	if (!cmd->data) {
+		EVDI_PERF_INC64(&evdi_perf.swap_delivered);
+		return 1;
+	}
+
+	memset(&swu, 0, sizeof(swu));
+	memset(&sw_legacy, 0, sizeof(sw_legacy));
+
+	swu.id = sw.id;
+	swu.display_id = sw.display_id;
+	swu.acquire_fence_fd = -1;
+
+	sw_legacy.id = sw.id;
+	sw_legacy.display_id = sw.display_id;
+
+	sync_fd = evdi_export_acquire_fence_for_swap(evdi, file,
+						    (u32)sw.display_id,
+						    (u32)sw.id,
+						    &sync_file);
+	if (sync_fd >= 0) {
+		if (sync_file) {
+			swu.acquire_fence_fd = sync_fd;
+		} else {
+			put_unused_fd(sync_fd);
+			sync_fd = -1;
+		}
+	} else {
+		sync_fd = -1;
+		sync_file = NULL;
+	}
+
+	if (copy_to_user(cmd->data, &swu, sizeof(swu))) {
+		if (sync_fd >= 0)
+			put_unused_fd(sync_fd);
+		if (sync_file)
+			fput(sync_file);
+
+		swu.acquire_fence_fd = -1;
+		if (copy_to_user(cmd->data, &sw_legacy, sizeof(sw_legacy)))
+			return -EFAULT;
+		return -EFAULT;
+	}
+
+	if (copy_to_user(cmd->data, &sw_legacy, sizeof(sw_legacy))) {
+		if (sync_fd >= 0)
+			put_unused_fd(sync_fd);
+		if (sync_file)
+			fput(sync_file);
+		return -EFAULT;
+	}
+
+	if (sync_fd >= 0)
+		fd_install(sync_fd, sync_file);
+
+	EVDI_PERF_INC64(&evdi_perf.swap_delivered);
+	return 1;
+}
+
+int evdi_ioctl_poll(struct drm_device *dev, void *data, struct drm_file *file)
+{
+	struct evdi_device *evdi = dev->dev_private;
+	struct drm_evdi_poll *cmd = data;
+	struct evdi_event *event;
 	size_t payload_size;
-	int ret, poll_id, syncfd;
+	int ret;
 
 	u8 payload_buf[EVDI_EVENT_PAYLOAD_MAX];
 
 	EVDI_PERF_INC64(&evdi_perf.ioctl_calls[1]);
 
-	/* swap mailbox fast path */
-	if (evdi_swap_dequeue_for_file(evdi, file, &sw, &poll_id)) {
-		cmd->event = swap_to;
-		cmd->poll_id = poll_id;
-		if (cmd->data) {
-			memset(&swu, 0, sizeof(swu));
-			memset(&sw_legacy, 0, sizeof(sw_legacy));
-			syncfile = NULL;
-			sw_legacy.id = sw.id;
-			sw_legacy.display_id = sw.display_id;
-			swu.id = sw.id;
-			swu.display_id = sw.display_id;
-			swu.acquire_fence_fd = -1;
-			syncfd = evdi_acquire_fence_take_export_syncfd(evdi,
-								      (u32)sw.display_id,
-								      (u32)sw.id,
-								      &syncfile);
-			if (syncfd >= 0 && syncfile)
-				swu.acquire_fence_fd = syncfd;
-			else if (syncfd >= 0) {
-				put_unused_fd(syncfd);
-				syncfd = -1;
-			}
-			if (copy_to_user(cmd->data, &swu, sizeof(swu))) {
-				if (syncfd >= 0) {
-					put_unused_fd(syncfd);
-					if (syncfile)
-						fput(syncfile);
-					syncfd = -1;
-					swu.acquire_fence_fd = -1;
-				}
-				if (copy_to_user(cmd->data, &sw_legacy, sizeof(sw_legacy)))
-					return -EFAULT;
-			}
-			if (syncfd >= 0)
-				fd_install(syncfd, syncfile);
-		}
-		EVDI_PERF_INC64(&evdi_perf.swap_delivered);
+	ret = evdi_ioctl_poll_try_swap(evdi, cmd, file);
+	if (ret < 0)
+		return ret;
+	if (ret > 0)
 		return 0;
-	}
 
 	event = evdi_event_dequeue(evdi);
 	if (likely(event)) {
@@ -646,46 +797,11 @@ int evdi_ioctl_poll(struct drm_device *dev, void *data, struct drm_file *file)
 	if (ret)
 		return ret;
 
-	if (evdi_swap_dequeue_for_file(evdi, file, &sw, &poll_id)) {
-		cmd->event = swap_to;
-		cmd->poll_id = poll_id;
-		if (cmd->data) {
-			memset(&swu, 0, sizeof(swu));
-			memset(&sw_legacy, 0, sizeof(sw_legacy));
-			syncfile = NULL;
-			swu.id = sw.id;
-			swu.display_id = sw.display_id;
-			swu.acquire_fence_fd = -1;
-
-			syncfd = evdi_acquire_fence_take_export_syncfd(evdi,
-								      (u32)sw.display_id,
-								      (u32)sw.id,
-								      &syncfile);
-			if (syncfd >= 0 && syncfile)
-				swu.acquire_fence_fd = syncfd;
-			else if (syncfd >= 0) {
-				put_unused_fd(syncfd);
-				syncfd = -1;
-			}
-			if (copy_to_user(cmd->data, &swu, sizeof(swu))) {
-				if (syncfd >= 0) {
-					put_unused_fd(syncfd);
-					if (syncfile)
-						fput(syncfile);
-					syncfd = -1;
-					swu.acquire_fence_fd = -1;
-				}
-				sw_legacy.id = sw.id;
-				sw_legacy.display_id = sw.display_id;
-				if (copy_to_user(cmd->data, &sw_legacy, sizeof(sw_legacy)))
-					return -EFAULT;
-			}
-			if (syncfd >= 0)
-				fd_install(syncfd, syncfile);
-		}
-		EVDI_PERF_INC64(&evdi_perf.swap_delivered);
+	ret = evdi_ioctl_poll_try_swap(evdi, cmd, file);
+	if (ret < 0)
+		return ret;
+	if (ret > 0)
 		return 0;
-	}
 
 	event = evdi_event_dequeue(evdi);
 	if (!event)
@@ -826,23 +942,48 @@ static inline void evdi_file_track_buffer(struct drm_file *file, int id)
 	mutex_lock(&priv->lock);
 
 #ifdef EVDI_HAVE_XARRAY
-#ifdef EVDI_HAVE_XA_ALLOC_CYCLIC
 	{
 		void *entry;
 		u32 handle = 0;
 
-		entry = xa_load(&priv->bufid_to_handle, id);
+		entry = xa_load(&priv->bufid_to_handle, (unsigned long)id);
 		if (entry)
-			goto out_unlock;
+			goto out_unlock; /* already tracked */
 
+#ifdef EVDI_HAVE_XA_ALLOC_CYCLIC
 		ret = xa_alloc_cyclic(&priv->handle_to_bufid, &handle,
 				      xa_mk_value((unsigned long)id),
 				      XA_LIMIT(1, INT_MAX),
 				      &priv->next_handle, GFP_KERNEL);
 		if (ret)
 			goto out_unlock;
+#else
+		{
+			u32 start = priv->next_handle ? priv->next_handle : 1;
+			unsigned long index = (unsigned long)start;
 
-		ret = xa_err(xa_store(&priv->bufid_to_handle, id,
+			ret = xa_alloc(&priv->handle_to_bufid, &index,
+				       xa_mk_value((unsigned long)id),
+				       XA_LIMIT(start, INT_MAX),
+				       GFP_KERNEL);
+			if (ret == -EBUSY) {
+				index = 1;
+				ret = xa_alloc(&priv->handle_to_bufid, &index,
+					       xa_mk_value((unsigned long)id),
+					       XA_LIMIT(1, INT_MAX),
+					       GFP_KERNEL);
+			}
+			if (ret)
+				goto out_unlock;
+
+			handle = (u32)index;
+			priv->next_handle = handle + 1;
+			if (!priv->next_handle)
+				priv->next_handle = 1;
+		}
+#endif
+
+		ret = xa_err(xa_store(&priv->bufid_to_handle, (unsigned long)id,
 				      xa_mk_value((unsigned long)handle),
 				      GFP_KERNEL));
 		if (ret) {
@@ -850,15 +991,48 @@ static inline void evdi_file_track_buffer(struct drm_file *file, int id)
 			goto out_unlock;
 		}
 	}
-#else
-	ret = xa_err(xa_store(&priv->buffers, id, xa_mk_value(1), GFP_KERNEL));
-	goto out_unlock;
-#endif
-#else
-	ret = idr_alloc(&priv->buffers, (void *)1, id, id + 1, GFP_KERNEL);
-	if (ret == id)
-		ret = 0;
-	goto out_unlock;
+#else /* !EVDI_HAVE_XARRAY */
+	{
+		void *entry;
+		int hret;
+		u32 handle;
+
+		entry = idr_find(&priv->bufid_to_handle, id);
+		if (entry)
+			goto out_unlock; /* already tracked */
+
+		handle = priv->next_handle ? priv->next_handle : 1;
+		hret = idr_alloc(&priv->handle_to_bufid,
+				 (void *)(unsigned long)id,
+				 (int)handle, INT_MAX, GFP_KERNEL);
+		if (hret < 0) {
+			hret = idr_alloc(&priv->handle_to_bufid,
+					 (void *)(unsigned long)id,
+					 1, INT_MAX, GFP_KERNEL);
+			if (hret < 0) {
+				ret = hret;
+				goto out_unlock;
+			}
+		}
+
+		handle = (u32)hret;
+		priv->next_handle = handle + 1;
+		if (!priv->next_handle)
+			priv->next_handle = 1;
+
+		ret = idr_alloc(&priv->bufid_to_handle,
+				(void *)(unsigned long)handle,
+				id, id + 1, GFP_KERNEL);
+		if (ret == id) {
+			ret = 0;
+		} else {
+			if (ret >= 0)
+				idr_remove(&priv->bufid_to_handle, ret);
+			idr_remove(&priv->handle_to_bufid, (int)handle);
+			ret = (ret < 0) ? ret : -EEXIST;
+			goto out_unlock;
+		}
+	}
 #endif
 
 out_unlock:
@@ -882,26 +1056,33 @@ static inline void evdi_file_untrack_buffer(struct drm_file *file, int id)
 	mutex_lock(&priv->lock);
 
 #ifdef EVDI_HAVE_XARRAY
-#ifdef EVDI_HAVE_XA_ALLOC_CYCLIC
 	{
 		void *entry;
 		u32 handle;
 
-		entry = xa_load(&priv->bufid_to_handle, id);
+		entry = xa_load(&priv->bufid_to_handle, (unsigned long)id);
 		if (!entry)
 			goto out_unlock;
 
 		handle = (u32)xa_to_value(entry);
-		xa_erase(&priv->bufid_to_handle, id);
-		xa_erase(&priv->handle_to_bufid, (unsigned long)handle);
+		xa_erase(&priv->bufid_to_handle, (unsigned long)id);
+		if (handle)
+			xa_erase(&priv->handle_to_bufid, (unsigned long)handle);
 	}
 #else
-	xa_erase(&priv->buffers, id);
-	goto out_unlock;
-#endif
-#else
-	idr_remove(&priv->buffers, id);
-	goto out_unlock;
+	{
+		void *entry;
+		u32 handle;
+
+		entry = idr_find(&priv->bufid_to_handle, id);
+		if (!entry)
+			goto out_unlock;
+
+		handle = (u32)(unsigned long)entry;
+		idr_remove(&priv->bufid_to_handle, id);
+		if (handle)
+			idr_remove(&priv->handle_to_bufid, (int)handle);
+	}
 #endif
 
 out_unlock:
@@ -1073,6 +1254,8 @@ int evdi_ioctl_set_acquire_fence(struct drm_device *dev, void *data, struct drm_
 {
 	struct evdi_device *evdi = dev->dev_private;
 	struct drm_evdi_set_acquire_fence *cmd = data;
+	u32 id_key;
+	u32 xlat_key = 0;
 
 	if (unlikely(!evdi || !cmd))
 		return -EINVAL;
@@ -1081,7 +1264,19 @@ int evdi_ioctl_set_acquire_fence(struct drm_device *dev, void *data, struct drm_
 	if (cmd->id <= 0 ||  cmd->id > INT_MAX)
 		return -EINVAL;
 
-	evdi_acquire_fence_set_fd(evdi, cmd->display_id, (u32)cmd->id, cmd->acquire_fence_fd);
+	id_key = (u32)cmd->id;
+	(void)evdi_file_bufid_to_handle(file, id_key, &xlat_key);
+
+	if (xlat_key && xlat_key != id_key) {
+		evdi_debug("evdi: set_acquire_fence display=%u id=%d keys={%u,%u} fd=%d\n",
+			   cmd->display_id, cmd->id, id_key, xlat_key, cmd->acquire_fence_fd);
+		evdi_acquire_fence_set_fd(evdi, cmd->display_id, id_key, cmd->acquire_fence_fd);
+		evdi_acquire_fence_set_fd(evdi, cmd->display_id, xlat_key, cmd->acquire_fence_fd);
+	} else {
+		evdi_debug("evdi: set_acquire_fence display=%u id=%d key=%u fd=%d\n",
+			   cmd->display_id, cmd->id, id_key, cmd->acquire_fence_fd);
+		evdi_acquire_fence_set_fd(evdi, cmd->display_id, id_key, cmd->acquire_fence_fd);
+	}
 	return 0;
 }
 

@@ -118,16 +118,13 @@ static int evdi_driver_open(struct drm_device *dev, struct drm_file *file)
 
 	mutex_init(&priv->lock);
 #ifdef EVDI_HAVE_XARRAY
-#ifdef EVDI_HAVE_XA_ALLOC_CYCLIC
 	xa_init_flags(&priv->bufid_to_handle, XA_FLAGS_ALLOC);
 	xa_init_flags(&priv->handle_to_bufid, XA_FLAGS_ALLOC);
+#else
+	idr_init(&priv->bufid_to_handle);
+	idr_init(&priv->handle_to_bufid);
+#endif
 	priv->next_handle = 1;
-#else
-	xa_init(&priv->buffers);
-#endif
-#else
-	idr_init(&priv->buffers);
-#endif
 	priv->swap_rr = 0;
 	file->driver_priv = priv;
 
@@ -156,14 +153,11 @@ static void evdi_driver_postclose(struct drm_device *dev, struct drm_file *file)
 	if (priv) {
 		mutex_lock(&priv->lock);
 #ifdef EVDI_HAVE_XARRAY
-#ifdef EVDI_HAVE_XA_ALLOC_CYCLIC
 		xa_destroy(&priv->handle_to_bufid);
 		xa_destroy(&priv->bufid_to_handle);
 #else
-		xa_destroy(&priv->buffers);
-#endif
-#else
-		idr_destroy(&priv->buffers);
+		idr_destroy(&priv->handle_to_bufid);
+		idr_destroy(&priv->bufid_to_handle);
 #endif
 		mutex_unlock(&priv->lock);
 

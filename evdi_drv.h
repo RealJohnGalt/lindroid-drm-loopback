@@ -14,6 +14,7 @@
 
 #include <linux/module.h>
 #include <linux/version.h>
+#include <linux/limits.h>
 #include <linux/mutex.h>
 #include <linux/device.h>
 #include <linux/platform_device.h>
@@ -266,16 +267,13 @@ struct evdi_display {
 struct evdi_file_priv {
 	struct mutex lock;
 #ifdef EVDI_HAVE_XARRAY
-#ifdef EVDI_HAVE_XA_ALLOC_CYCLIC
 	struct xarray bufid_to_handle;
 	struct xarray handle_to_bufid;
+#else
+	struct idr bufid_to_handle;
+	struct idr handle_to_bufid;
+#endif
 	u32 next_handle;
-#else
-	struct xarray buffers;
-#endif
-#else
-	struct idr buffers;
-#endif
 	u64 last_swap_seq[LINDROID_MAX_CONNECTORS];
 	u8 swap_rr;
 };
