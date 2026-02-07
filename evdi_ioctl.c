@@ -1068,7 +1068,8 @@ int evdi_ioctl_set_acquire_fence(struct drm_device *dev, void *data, struct drm_
 	if (cmd->id <= 0 || cmd->id > INT_MAX)
 		return -EINVAL;
 
-	evdi_debug("set_acquire_fence display=%u id=%d fd=%d\n",
+	//XXX TODO temp
+	evdi_err("set_acquire_fence display=%u id=%d fd=%d\n",
 		   cmd->display_id, cmd->id, cmd->acquire_fence_fd);
 
 	return evdi_pending_acquire_fence_set_fd(evdi, cmd->display_id,
