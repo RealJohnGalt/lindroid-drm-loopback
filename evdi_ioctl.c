@@ -78,7 +78,7 @@ static int evdi_process_gralloc_buffer(struct evdi_inflight_req *req,
 		       sizeof(int) * gralloc_buf->numInts);
 	}
 
-	fd_tmp = evdi_get_unused_fds_batch(gralloc_buf->numFds, O_RDWR, installed_fds);
+	fd_tmp = evdi_get_unused_fds_batch(gralloc_buf->numFds, O_CLOEXEC, installed_fds);
 	if (unlikely(fd_tmp < 0)) {
 		for (i = 0; i < gralloc_buf->numFds; i++) {
 			if (installed_fds[i] >= 0)
@@ -400,12 +400,27 @@ int evdi_ioctl_connect(struct drm_device *dev, void *data, struct drm_file *file
 {
 	struct evdi_device *evdi = dev->dev_private;
 	struct drm_evdi_connect *cmd = data;
+	int d;
 
 	EVDI_PERF_INC64(&evdi_perf.ioctl_calls[0]);
 
 	if (!cmd->connected) {
-		if (cmd->display_id >= LINDROID_MAX_CONNECTORS)
+		d = (int)cmd->display_id;
+		if (d >= LINDROID_MAX_CONNECTORS)
 			return -EINVAL;
+
+		evdi_pending_acquire_fence_drop_owner(evdi, file);
+		if (d >= 0 && d < LINDROID_MAX_CONNECTORS) {
+			atomic_set(&evdi->swap_pending_pollid[d], 0);
+			atomic_set(&evdi->swap_pending[d], 0);
+			atomic_set(&evdi->swap_pending_bufid[d], 0);
+			evdi_smp_wmb();
+
+			wake_up_interruptible_all(&evdi->swap_ack_waitq);
+
+			evdi_pending_acquire_fence_clear(evdi, (u32)d);
+			evdi_swap_release_fence_clear(evdi, (u32)d);
+		}
 		evdi_flush_work(evdi);
 		mutex_lock(&evdi->config_mutex);
 		evdi->displays[cmd->display_id].connected = false;
@@ -552,30 +567,85 @@ static __always_inline bool evdi_swap_dequeue_for_file(struct evdi_device *evdi,
 	return false;
 }
 
+static __always_inline int evdi_ioctl_poll_try_swap(struct evdi_device *evdi,
+						    struct drm_evdi_poll *cmd,
+						    struct drm_file *file)
+{
+	struct evdi_swap sw;
+	struct drm_evdi_swap_event swu;
+	struct file *syncfile = NULL;
+	struct dma_fence *af = NULL;
+	int syncfd = -1;
+	int pollid = 0;
+	int pret;
+
+	if (!evdi_swap_dequeue_for_file(evdi, file, &sw, &pollid))
+		return 0;
+
+	cmd->event = swap_to;
+	cmd->poll_id = pollid;
+
+	if (!cmd->data) {
+		EVDI_PERF_INC64(&evdi_perf.swap_delivered);
+		return 1;
+	}
+
+	memset(&swu, 0, sizeof(swu));
+	swu.id = sw.id;
+	swu.display_id = sw.display_id;
+	swu.acquire_fence_fd = -1;
+
+	/* Peek/export (do not consume until we know user got the event) */
+	pret = evdi_pending_acquire_fence_peek_get(evdi, (u32)sw.display_id, file, &af);
+	if (!pret && af) {
+		syncfd = evdi_syncfd_reserve_from_fence(af, &syncfile);
+		if (syncfd >= 0 && syncfile) {
+			swu.acquire_fence_fd = syncfd;
+		} else if (syncfd >= 0) {
+			put_unused_fd(syncfd);
+			syncfd = -1;
+		}
+	}
+
+	if (copy_to_user(cmd->data, &swu, sizeof(swu))) {
+		if (syncfd >= 0)
+			put_unused_fd(syncfd);
+		if (syncfile)
+			fput(syncfile);
+		if (af)
+			dma_fence_put(af);
+		return -EFAULT;
+	}
+
+	if (syncfd >= 0)
+		fd_install(syncfd, syncfile);
+
+	if (af) {
+		evdi_pending_acquire_fence_consume_if(evdi, (u32)sw.display_id, file, af);
+		dma_fence_put(af);
+	}
+
+	EVDI_PERF_INC64(&evdi_perf.swap_delivered);
+	return 1;
+}
+
 int evdi_ioctl_poll(struct drm_device *dev, void *data, struct drm_file *file)
 {
 	struct evdi_device *evdi = dev->dev_private;
 	struct drm_evdi_poll *cmd = data;
 	struct evdi_event *event;
-	struct evdi_swap sw;
 	size_t payload_size;
-	int ret, poll_id;
+	int ret;
 
 	u8 payload_buf[EVDI_EVENT_PAYLOAD_MAX];
 
 	EVDI_PERF_INC64(&evdi_perf.ioctl_calls[1]);
 
-	/* swap mailbox fast path */
-	if (evdi_swap_dequeue_for_file(evdi, file, &sw, &poll_id)) {
-		cmd->event = swap_to;
-		cmd->poll_id = poll_id;
-		if (cmd->data) {
-			if (evdi_copy_to_user_allow_partial(cmd->data, &sw, sizeof(sw)))
-				return -EFAULT;
-		}
-		EVDI_PERF_INC64(&evdi_perf.swap_delivered);
+	ret = evdi_ioctl_poll_try_swap(evdi, cmd, file);
+	if (ret < 0)
+		return ret;
+	if (ret > 0)
 		return 0;
-	}
 
 	event = evdi_event_dequeue(evdi);
 	if (likely(event)) {
@@ -598,16 +668,11 @@ int evdi_ioctl_poll(struct drm_device *dev, void *data, struct drm_file *file)
 	if (ret)
 		return ret;
 
-	if (evdi_swap_dequeue_for_file(evdi, file, &sw, &poll_id)) {
-		cmd->event = swap_to;
-		cmd->poll_id = poll_id;
-		if (cmd->data) {
-			if (evdi_copy_to_user_allow_partial(cmd->data, &sw, sizeof(sw)))
-				return -EFAULT;
-		}
-		EVDI_PERF_INC64(&evdi_perf.swap_delivered);
+	ret = evdi_ioctl_poll_try_swap(evdi, cmd, file);
+	if (ret < 0)
+		return ret;
+	if (ret > 0)
 		return 0;
-	}
 
 	event = evdi_event_dequeue(evdi);
 	if (!event)
@@ -991,9 +1056,45 @@ int evdi_ioctl_destroy_buff_callback(struct drm_device *dev, void *data, struct 
 	return 0;
 }
 
+int evdi_ioctl_set_acquire_fence(struct drm_device *dev, void *data, struct drm_file *file)
+{
+	struct evdi_device *evdi = dev->dev_private;
+	struct drm_evdi_set_acquire_fence *cmd = data;
+
+	if (unlikely(!evdi || !cmd))
+		return -EINVAL;
+	if (cmd->display_id >= LINDROID_MAX_CONNECTORS)
+		return -EINVAL;
+	if (cmd->id <= 0 || cmd->id > INT_MAX)
+		return -EINVAL;
+
+	evdi_debug("set_acquire_fence display=%u id=%d fd=%d\n",
+		   cmd->display_id, cmd->id, cmd->acquire_fence_fd);
+
+	return evdi_pending_acquire_fence_set_fd(evdi, cmd->display_id,
+						 READ_ONCE(evdi->drm_client),
+						 (u32)cmd->id, cmd->acquire_fence_fd);
+}
+
 int evdi_ioctl_swap_callback(struct drm_device *dev, void *data, struct drm_file *file)
 {
 	struct evdi_device *evdi = dev->dev_private;
+	struct drm_evdi_swap_callback *cb = data;
+	int d;
+
+	if (unlikely(!evdi || !cb))
+		return -EINVAL;
+
+	for (d = 0; d < LINDROID_MAX_CONNECTORS; d++) {
+		if (!atomic_read(&evdi->swap_pending[d]))
+			continue;
+		if (atomic_read(&evdi->swap_pending_pollid[d]) != cb->poll_id)
+			continue;
+
+		evdi_swap_release_fence_set_fd(evdi, (u32)d, cb->release_fence_fd);
+		wake_up_interruptible(&evdi->swap_ack_waitq);
+		break;
+	}
 
 	EVDI_PERF_INC64(&evdi_perf.ioctl_calls[5]);
 
@@ -1057,8 +1158,8 @@ static int evdi_queue_int_event(struct evdi_device *evdi,
 	return 0;
 }
 
-int evdi_queue_swap_event(struct evdi_device *evdi,
-	int id, int display_id, struct drm_file *owner)
+int evdi_queue_swap_event(struct evdi_device *evdi, int id, int display_id,
+			  struct drm_file *owner)
 {
 	struct evdi_swap_mailbox *mb;
 	struct drm_file *client;
@@ -1067,28 +1168,44 @@ int evdi_queue_swap_event(struct evdi_device *evdi,
 
 	if (unlikely(!evdi))
 		return -EINVAL;
+	if (unlikely(id <= 0 || id > INT_MAX))
+		return -EINVAL;
 	if (unlikely(display_id < 0 || display_id >= LINDROID_MAX_CONNECTORS))
 		return -EINVAL;
 	if (unlikely(atomic_read(&evdi->events.stopping)))
 		return -ENODEV;
 
+	/* Do not overwrite an un-ACKed swap for pacing */
+	if (atomic_cmpxchg(&evdi->swap_pending[display_id], 0, 1) != 0)
+		return -EBUSY;
+
+	/* New pending swap  resets any previous release fence for this display */
+	evdi_swap_release_fence_clear(evdi, (u32)display_id);
+
 	client = READ_ONCE(evdi->drm_client);
-	if (client)
+	if (client && owner != client)
 		owner = client;
 
-	if (unlikely(!owner))
+	if (unlikely(!owner)) {
+		atomic_set(&evdi->swap_pending[display_id], 0);
+		evdi_swap_release_fence_clear(evdi, (u32)display_id);
 		return -ENODEV;
+	}
+
+	poll_id = atomic_inc_return(&evdi->events.next_poll_id);
+	atomic_set(&evdi->swap_pending_pollid[display_id], poll_id);
+	atomic_set(&evdi->swap_pending_bufid[display_id], id);
 
 	mb = &evdi->swap_mailbox[display_id];
 	payload = evdi_swap_pack(id, display_id);
-	poll_id = atomic_inc_return(&evdi->events.next_poll_id);
 
-	atomic64_inc(&mb->seq); // odd
+	/* Sequence odd/even mailbox design */
+	atomic64_inc(&mb->seq);
 	WRITE_ONCE(mb->owner, owner);
 	atomic_set(&mb->poll_id, poll_id);
 	atomic64_set(&mb->payload, payload);
 	evdi_smp_wmb();
-	atomic64_inc(&mb->seq); // even
+	atomic64_inc(&mb->seq);
 
 	EVDI_PERF_INC64(&evdi_perf.swap_updates);
 	wake_up_interruptible(&evdi->events.wait_queue);

@@ -57,8 +57,21 @@ struct drm_evdi_destroy_buff_callback {
 	int poll_id;
 };
 
+struct drm_evdi_swap_event {
+	int id;
+	int display_id;
+	int acquire_fence_fd;
+};
+
+struct drm_evdi_set_acquire_fence {
+	int id;
+	uint32_t display_id;
+	int acquire_fence_fd;
+};
+
 struct drm_evdi_swap_callback {
 	int poll_id;
+	int release_fence_fd;
 };
 
 struct drm_evdi_create_buff_callabck {
@@ -96,6 +109,7 @@ struct drm_evdi_gbm_del_buff {
 #define DRM_EVDI_GBM_DEL_BUFF               0x0B  /* Unused by create-disp */
 #define DRM_EVDI_GBM_CREATE_BUFF            0x0C  /* Unused by create-disp */
 #define DRM_EVDI_GBM_CREATE_BUFF_CALLBACK   0x0D
+#define DRM_EVDI_SET_ACQUIRE_FENCE          0x0E
 
 #define DRM_IOCTL_EVDI_CONNECT DRM_IOWR(DRM_COMMAND_BASE + \
 	DRM_EVDI_CONNECT, struct drm_evdi_connect)
@@ -123,5 +137,8 @@ struct drm_evdi_gbm_del_buff {
 
 #define DRM_IOCTL_EVDI_GBM_DEL_BUFF DRM_IOWR(DRM_COMMAND_BASE + \
 	DRM_EVDI_GBM_DEL_BUFF, struct drm_evdi_gbm_del_buff)
+
+#define DRM_IOCTL_EVDI_SET_ACQUIRE_FENCE DRM_IOWR(DRM_COMMAND_BASE + \
+	DRM_EVDI_SET_ACQUIRE_FENCE, struct drm_evdi_set_acquire_fence)
 
 #endif /* __UAPI_EVDI_DRM_H__ */

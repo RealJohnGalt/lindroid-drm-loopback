@@ -12,6 +12,7 @@
 #include "evdi_drv.h"
 #include <drm/drm_gem_framebuffer_helper.h>
 #include <drm/drm_atomic_helper.h>
+#include <linux/dma-fence.h>
 
 static const struct drm_mode_config_funcs evdi_mode_config_funcs = {
 	.fb_create	= evdi_fb_user_fb_create,
@@ -52,6 +53,8 @@ static void evdi_pipe_update(struct drm_simple_display_pipe *pipe,
 	struct drm_framebuffer *fb = state ? state->fb : NULL;
 	struct evdi_device *evdi = pipe->plane.dev->dev_private;
 	struct evdi_framebuffer *efb;
+	struct dma_fence *rf;
+	int slot;
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 19, 0)
 	struct drm_pending_vblank_event *vblank_ev;
 	struct drm_device *ddev;
@@ -71,12 +74,34 @@ static void evdi_pipe_update(struct drm_simple_display_pipe *pipe,
 	if (!state || !fb)
 		return;
 
+	slot = evdi_connector_slot(evdi, pipe->connector);
+
+	/* Swap pacing: throttle until userspace ACK + release fence signaled (or no fence) */
+	if (atomic_read(&evdi->swap_pending[slot])) {
+		if (!atomic_read(&evdi->swap_release_ready[slot]))
+			return;
+
+		rf = evdi_swap_release_fence_get(evdi, (u32)slot);
+		if (rf) {
+			if (!dma_fence_is_signaled(rf)) {
+				dma_fence_put(rf);
+				return;
+			}
+			dma_fence_put(rf);
+		}
+
+		evdi_swap_release_fence_clear(evdi, (u32)slot);
+		atomic_set(&evdi->swap_pending_pollid[slot], 0);
+		atomic_set(&evdi->swap_pending[slot], 0);
+		atomic_set(&evdi->swap_pending_bufid[slot], 0);
+	}
+
 	efb = to_evdi_fb(fb);
 
-	if (efb && efb->owner && efb->gralloc_buf_id)
+	if (efb && efb->owner && efb->gralloc_buf_id > 0 && efb->gralloc_buf_id <= INT_MAX)
 		evdi_queue_swap_event(evdi,
 				      efb->gralloc_buf_id,
-				      evdi_connector_slot(evdi, pipe->connector),
+				      slot,
 				      efb->owner);
 
 	if (unlikely(!READ_ONCE(evdi->drm_client)))

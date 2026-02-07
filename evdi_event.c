@@ -628,9 +628,23 @@ void evdi_event_cleanup_file(struct evdi_device *evdi, struct drm_file *file)
 	if (unlikely(!evdi || !file))
 		return;
 
+	evdi_pending_acquire_fence_drop_owner(evdi, file);
+
 	for (d = 0; d < LINDROID_MAX_CONNECTORS; d++) {
 		if (READ_ONCE(evdi->swap_mailbox[d].owner) != file)
 			continue;
+
+		if (atomic_read(&evdi->swap_pending[d])) {
+			atomic_set(&evdi->swap_pending_pollid[d], 0);
+			atomic_set(&evdi->swap_pending[d], 0);
+			atomic_set(&evdi->swap_pending_bufid[d], 0);
+			evdi_smp_wmb();
+
+			wake_up_interruptible_all(&evdi->swap_ack_waitq);
+
+			evdi_pending_acquire_fence_clear(evdi, (u32)d);
+			evdi_swap_release_fence_clear(evdi, (u32)d);
+		}
 
 		atomic64_inc(&evdi->swap_mailbox[d].seq);
 		WRITE_ONCE(evdi->swap_mailbox[d].owner, NULL);

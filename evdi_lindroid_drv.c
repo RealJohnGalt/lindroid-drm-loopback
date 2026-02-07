@@ -12,6 +12,7 @@
 #include "evdi_drv.h"
 #include <linux/platform_device.h>
 #include <linux/of.h>
+#include <linux/wait.h>
 
 extern int evdi_event_system_init(void);
 extern void evdi_event_system_cleanup(void);
@@ -58,6 +59,8 @@ static const struct drm_ioctl_desc evdi_ioctls[] = {
 	DRM_IOCTL_DEF_DRV(EVDI_GBM_CREATE_BUFF_CALLBACK, evdi_ioctl_create_buff_callback,
 			 EVDI_IOCTL_FLAGS),
 	DRM_IOCTL_DEF_DRV(EVDI_GBM_DEL_BUFF, evdi_ioctl_gbm_del_buff,
+			 EVDI_IOCTL_FLAGS),
+	DRM_IOCTL_DEF_DRV(EVDI_SET_ACQUIRE_FENCE, evdi_ioctl_set_acquire_fence,
 			 EVDI_IOCTL_FLAGS),
 };
 
@@ -147,6 +150,11 @@ static void evdi_driver_postclose(struct drm_device *dev, struct drm_file *file)
 	evdi_inflight_discard_owner(evdi, file);
 	evdi_smp_mb();
 
+	if (READ_ONCE(evdi->drm_client) == file) {
+		WRITE_ONCE(evdi->drm_client, NULL);
+		evdi_fence_tables_reset(evdi);
+	}
+
 	evdi_event_cleanup_file(evdi, file);
 
 	if (priv) {
@@ -186,6 +194,19 @@ int evdi_device_init(struct evdi_device *evdi, struct platform_device *pdev)
 	evdi->drm_client = NULL;
 
 	mutex_init(&evdi->config_mutex);
+	mutex_init(&evdi->fence_mutex);
+
+	init_waitqueue_head(&evdi->swap_ack_waitq);
+	for (i = 0; i < LINDROID_MAX_CONNECTORS; i++) {
+		atomic_set(&evdi->swap_pending[i], 0);
+		atomic_set(&evdi->swap_pending_pollid[i], 0);
+		atomic_set(&evdi->swap_pending_bufid[i], 0);
+		atomic_set(&evdi->swap_release_ready[i], 0);
+		evdi->swap_release_fence[i] = NULL;
+		evdi->pending_acquire_id[i] = 0;
+		evdi->pending_acquire_owner[i] = NULL;
+		evdi->pending_acquire_fence[i] = NULL;
+	}
 	
 #ifdef EVDI_HAVE_XARRAY
 	xa_init_flags(&evdi->file_xa, XA_FLAGS_ALLOC);
@@ -200,6 +221,8 @@ int evdi_device_init(struct evdi_device *evdi, struct platform_device *pdev)
 
 	evdi->pdev = pdev;
 
+	evdi_fence_tables_init(evdi);
+
 	ret = evdi_event_init(evdi);
 	if (ret) {
 		evdi_err("Failed to initialize event system: %d", ret);
@@ -212,6 +235,7 @@ int evdi_device_init(struct evdi_device *evdi, struct platform_device *pdev)
 	return 0;
 
 err_cleanup_locks:
+	evdi_fence_tables_cleanup(evdi);
 	evdi_event_cleanup(evdi);
 #ifdef EVDI_HAVE_XARRAY
 	xa_destroy(&evdi->file_xa);
@@ -220,6 +244,7 @@ err_cleanup_locks:
 	idr_destroy(&evdi->file_idr);
 	idr_destroy(&evdi->inflight_idr);
 #endif
+	mutex_destroy(&evdi->fence_mutex);
 	mutex_destroy(&evdi->config_mutex);
 	return ret;
 }
@@ -262,6 +287,9 @@ void evdi_device_cleanup(struct evdi_device *evdi)
 
 	evdi_smp_wmb();
 
+	wake_up_all(&evdi->swap_ack_waitq);
+	evdi_fence_tables_cleanup(evdi);
+
 	evdi_debug("Cleaning up device %d", evdi->dev_index);
 
 	evdi_event_cleanup(evdi);
@@ -273,6 +301,7 @@ void evdi_device_cleanup(struct evdi_device *evdi)
 	idr_destroy(&evdi->file_idr);
 	idr_destroy(&evdi->inflight_idr);
 #endif
+	mutex_destroy(&evdi->fence_mutex);
 	mutex_destroy(&evdi->config_mutex);
 
 	evdi_debug("Device %d cleaned up", evdi->dev_index);
