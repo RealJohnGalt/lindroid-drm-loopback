@@ -596,7 +596,7 @@ static __always_inline int evdi_ioctl_poll_try_swap(struct evdi_device *evdi,
 	swu.acquire_fence_fd = -1;
 
 	/* Peek/export (do not consume until we know user got the event) */
-	pret = evdi_pending_acquire_fence_peek_get(evdi, (u32)sw.display_id, file, &af);
+	pret = evdi_pending_acquire_fence_peek_get(evdi, (u32)sw.display_id, NULL, &af);
 	if (!pret && af) {
 		syncfd = evdi_syncfd_reserve_from_fence(af, &syncfile);
 		if (syncfd >= 0 && syncfile) {
@@ -621,7 +621,7 @@ static __always_inline int evdi_ioctl_poll_try_swap(struct evdi_device *evdi,
 		fd_install(syncfd, syncfile);
 
 	if (af) {
-		evdi_pending_acquire_fence_consume_if(evdi, (u32)sw.display_id, file, af);
+		evdi_pending_acquire_fence_consume_if(evdi, (u32)sw.display_id, NULL, af);
 		dma_fence_put(af);
 	}
 
@@ -1073,7 +1073,7 @@ int evdi_ioctl_set_acquire_fence(struct drm_device *dev, void *data, struct drm_
 		   cmd->display_id, cmd->id, cmd->acquire_fence_fd);
 
 	return evdi_pending_acquire_fence_set_fd(evdi, cmd->display_id,
-						 READ_ONCE(evdi->drm_client),
+						 file,
 						 (u32)cmd->id, cmd->acquire_fence_fd);
 }
 
