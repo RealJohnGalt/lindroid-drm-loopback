@@ -632,6 +632,17 @@ void evdi_event_cleanup_file(struct evdi_device *evdi, struct drm_file *file)
 		if (READ_ONCE(evdi->swap_mailbox[d].owner) != file)
 			continue;
 
+		if (atomic_read(&evdi->swap_pending[d])) {
+			atomic_set(&evdi->swap_pending_pollid[d], 0);
+			atomic_set(&evdi->swap_pending[d], 0);
+			atomic_set(&evdi->swap_pending_bufid[d], 0);
+			evdi_smp_wmb();
+
+			evdi_swap_release_fence_clear(evdi, (u32)d);
+			evdi_swap_acquire_fence_clear(evdi, (u32)d);
+			evdi_pending_acquire_fence_clear(evdi, (u32)d);
+		}
+
 		atomic64_inc(&evdi->swap_mailbox[d].seq);
 		WRITE_ONCE(evdi->swap_mailbox[d].owner, NULL);
 		atomic_set(&evdi->swap_mailbox[d].poll_id, 0);
@@ -639,6 +650,9 @@ void evdi_event_cleanup_file(struct evdi_device *evdi, struct drm_file *file)
 		evdi_smp_wmb();
 		atomic64_inc(&evdi->swap_mailbox[d].seq);
 	}
+	/* drop leftover acquire fence maps */
+	if (READ_ONCE(evdi->drm_client) == file)
+		evdi_fence_tables_reset(evdi);
 
 	if (atomic_read(&evdi->events.queue_size) == 0 &&
 	    llist_empty(&evdi->events.lockfree_head))

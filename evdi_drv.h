@@ -14,6 +14,8 @@
 
 #include <linux/module.h>
 #include <linux/version.h>
+#include <linux/limits.h>
+#include <linux/jiffies.h>
 #include <linux/mutex.h>
 #include <linux/device.h>
 #include <linux/platform_device.h>
@@ -262,6 +264,9 @@ struct evdi_display {
 	uint32_t refresh_rate;
 };
 
+struct dma_fence;
+struct drm_file;
+
 struct evdi_file_priv {
 	struct mutex lock;
 #ifdef EVDI_HAVE_XARRAY
@@ -313,7 +318,18 @@ struct evdi_device {
 
 	struct evdi_swap_mailbox swap_mailbox[LINDROID_MAX_CONNECTORS];
 
+	atomic_t swap_pending[LINDROID_MAX_CONNECTORS];
+	atomic_t swap_pending_pollid[LINDROID_MAX_CONNECTORS];
+	atomic_t swap_pending_bufid[LINDROID_MAX_CONNECTORS];
+
+	atomic_t swap_release_ready[LINDROID_MAX_CONNECTORS];
+	struct dma_fence *swap_release_fence[LINDROID_MAX_CONNECTORS];
+
+	struct dma_fence *pending_acquire_fence[LINDROID_MAX_CONNECTORS];
+	struct dma_fence *swap_acquire_fence[LINDROID_MAX_CONNECTORS];
+
 	struct mutex config_mutex;
+	struct mutex fence_mutex;
 
 	struct platform_device *pdev;
 
@@ -377,6 +393,28 @@ int evdi_ioctl_gbm_get_buff(struct drm_device *dev, void *data, struct drm_file 
 int evdi_ioctl_gbm_del_buff(struct drm_device *dev, void *data, struct drm_file *file);
 int evdi_queue_swap_event(struct evdi_device *evdi, int id, int display_id, struct drm_file *owner);
 int evdi_queue_destroy_event(struct evdi_device *evdi, int id, struct drm_file *owner);
+int evdi_ioctl_set_acquire_fence(struct drm_device *dev, void *data, struct drm_file *file);
+
+/* evdi_fence.c */
+void evdi_fence_tables_init(struct evdi_device *evdi);
+void evdi_fence_tables_reset(struct evdi_device *evdi);
+void evdi_fence_tables_cleanup(struct evdi_device *evdi);
+int evdi_syncfd_reserve_from_fence(struct dma_fence *f, struct file **out_file);
+int evdi_pending_acquire_fence_set_fd(struct evdi_device *evdi, u32 display_id,
+				      int acquire_fence_fd);
+void evdi_pending_acquire_fence_clear(struct evdi_device *evdi, u32 display_id);
+void evdi_swap_acquire_fence_snapshot(struct evdi_device *evdi, u32 display_id);
+void evdi_swap_acquire_fence_snapshot_if_needed(struct evdi_device *evdi, u32 display_id);
+int evdi_swap_acquire_fence_peek_get(struct evdi_device *evdi, u32 display_id,
+				     struct dma_fence **out_fence);
+void evdi_swap_acquire_fence_consume_if(struct evdi_device *evdi, u32 display_id,
+					struct dma_fence *fence);
+void evdi_swap_acquire_fence_clear(struct evdi_device *evdi, u32 display_id);
+void evdi_swap_release_fence_set_fd(struct evdi_device *evdi, u32 display_id,
+				    int release_fence_fd);
+struct dma_fence *evdi_swap_release_fence_get(struct evdi_device *evdi,
+					      u32 display_id);
+void evdi_swap_release_fence_clear(struct evdi_device *evdi, u32 display_id);
 
 /* evdi_event.c */
 int evdi_event_init(struct evdi_device *evdi);
