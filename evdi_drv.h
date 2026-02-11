@@ -14,6 +14,7 @@
 
 #include <linux/module.h>
 #include <linux/version.h>
+#include <linux/dma-fence.h>
 #include <linux/mutex.h>
 #include <linux/device.h>
 #include <linux/platform_device.h>
@@ -318,6 +319,11 @@ struct evdi_device {
 	atomic_t swap_pending[LINDROID_MAX_CONNECTORS];
 	atomic_t swap_pending_pollid[LINDROID_MAX_CONNECTORS];
 
+	struct dma_fence *pending_acquire_fence[LINDROID_MAX_CONNECTORS];
+	struct dma_fence *swap_acquire_fence[LINDROID_MAX_CONNECTORS];
+	struct dma_fence *swap_release_fence[LINDROID_MAX_CONNECTORS];
+
+	struct mutex fence_mutex;
 	struct mutex config_mutex;
 
 	struct platform_device *pdev;
@@ -380,8 +386,18 @@ void evdi_inflight_discard_owner(struct evdi_device *evdi, struct drm_file *owne
 int evdi_ioctl_request_update(struct drm_device *dev, void *data, struct drm_file *file);
 int evdi_ioctl_gbm_get_buff(struct drm_device *dev, void *data, struct drm_file *file);
 int evdi_ioctl_gbm_del_buff(struct drm_device *dev, void *data, struct drm_file *file);
+int evdi_ioctl_set_acquire_fence(struct drm_device *dev, void *data, struct drm_file *file);
 int evdi_queue_swap_event(struct evdi_device *evdi, int id, int display_id, struct drm_file *owner);
 int evdi_queue_destroy_event(struct evdi_device *evdi, int id, struct drm_file *owner);
+
+/* evdi_fence.c */
+int evdi_pending_acquire_fence_set_fd(struct evdi_device *evdi, u32 display_id, int acquire_fence_fd);
+void evdi_swap_acquire_fence_snapshot(struct evdi_device *evdi, u32 display_id);
+int evdi_swap_acquire_fence_get_fd(struct evdi_device *evdi, u32 display_id);
+void evdi_swap_release_fence_set_fd(struct evdi_device *evdi, u32 display_id, int release_fence_fd);
+void evdi_swap_release_fence_wait_and_clear(struct evdi_device *evdi, u32 display_id);
+void evdi_fence_init(struct evdi_device *evdi);
+void evdi_fence_cleanup(struct evdi_device *evdi);
 
 /* evdi_event.c */
 int evdi_event_init(struct evdi_device *evdi);
