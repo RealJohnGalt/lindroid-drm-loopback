@@ -60,6 +60,8 @@ static const struct drm_ioctl_desc evdi_ioctls[] = {
 			 EVDI_IOCTL_FLAGS),
 	DRM_IOCTL_DEF_DRV(EVDI_GBM_DEL_BUFF, evdi_ioctl_gbm_del_buff,
 			 EVDI_IOCTL_FLAGS),
+	DRM_IOCTL_DEF_DRV(EVDI_SET_ACQUIRE_FENCE, evdi_ioctl_set_acquire_fence,
+			 EVDI_IOCTL_FLAGS),
 };
 
 static struct drm_driver evdi_driver = {
@@ -189,6 +191,8 @@ int evdi_device_init(struct evdi_device *evdi, struct platform_device *pdev)
 	mutex_init(&evdi->config_mutex);
 
 	init_waitqueue_head(&evdi->swap_ack_waitq);
+	evdi_fence_init(evdi);
+
 	for (i = 0; i < LINDROID_MAX_CONNECTORS; i++) {
 		atomic_set(&evdi->swap_pending[i], 0);
 		atomic_set(&evdi->swap_pending_pollid[i], 0);
@@ -219,6 +223,7 @@ int evdi_device_init(struct evdi_device *evdi, struct platform_device *pdev)
 	return 0;
 
 err_cleanup_locks:
+	evdi_fence_cleanup(evdi);
 	evdi_event_cleanup(evdi);
 #ifdef EVDI_HAVE_XARRAY
 	xa_destroy(&evdi->file_xa);
@@ -268,6 +273,8 @@ void evdi_device_cleanup(struct evdi_device *evdi)
 #endif
 
 	evdi_smp_wmb();
+
+	evdi_fence_cleanup(evdi);
 
 	evdi_debug("Cleaning up device %d", evdi->dev_index);
 

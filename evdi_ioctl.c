@@ -552,6 +552,36 @@ static __always_inline bool evdi_swap_dequeue_for_file(struct evdi_device *evdi,
 	return false;
 }
 
+static int evdi_swap_with_fence(struct evdi_device *evdi, struct drm_evdi_poll *cmd,
+				const struct evdi_swap *sw, int poll_id)
+{
+	struct drm_evdi_swap swu;
+	int acquire_fd;
+
+	if (!cmd->data)
+		return 0;
+
+	memset(&swu, 0, sizeof(swu));
+	swu.id = sw->id;
+	swu.display_id = sw->display_id;
+
+	/* Get acquire fence fd if available */
+	acquire_fd = evdi_swap_acquire_fence_get_fd(evdi, (u32)sw->display_id);
+	swu.acquire_fence_fd = acquire_fd;
+
+	if (evdi_copy_to_user_allow_partial(cmd->data, &swu, sizeof(swu)))
+		return -EFAULT;
+
+	return 0;
+}
+
+int evdi_ioctl_set_acquire_fence(struct drm_device *dev, void *data, struct drm_file *file)
+{
+	struct evdi_device *evdi = dev->dev_private;
+	struct drm_evdi_set_acquire_fence *cmd = data;
+	return evdi_pending_acquire_fence_set_fd(evdi, cmd->display_id, cmd->acquire_fence_fd);
+}
+
 int evdi_ioctl_poll(struct drm_device *dev, void *data, struct drm_file *file)
 {
 	struct evdi_device *evdi = dev->dev_private;
@@ -569,11 +599,9 @@ int evdi_ioctl_poll(struct drm_device *dev, void *data, struct drm_file *file)
 	if (evdi_swap_dequeue_for_file(evdi, file, &sw, &poll_id)) {
 		cmd->event = swap_to;
 		cmd->poll_id = poll_id;
-		if (cmd->data) {
-			if (evdi_copy_to_user_allow_partial(cmd->data, &sw, sizeof(sw)))
-				return -EFAULT;
-		}
-		EVDI_PERF_INC64(&evdi_perf.swap_delivered);
+		ret = evdi_swap_with_fence(evdi, cmd, &sw, poll_id);
+		if (!ret)
+			EVDI_PERF_INC64(&evdi_perf.swap_delivered);
 		return 0;
 	}
 
@@ -601,11 +629,9 @@ int evdi_ioctl_poll(struct drm_device *dev, void *data, struct drm_file *file)
 	if (evdi_swap_dequeue_for_file(evdi, file, &sw, &poll_id)) {
 		cmd->event = swap_to;
 		cmd->poll_id = poll_id;
-		if (cmd->data) {
-			if (evdi_copy_to_user_allow_partial(cmd->data, &sw, sizeof(sw)))
-				return -EFAULT;
-		}
-		EVDI_PERF_INC64(&evdi_perf.swap_delivered);
+		ret = evdi_swap_with_fence(evdi, cmd, &sw, poll_id);
+		if (!ret)
+			EVDI_PERF_INC64(&evdi_perf.swap_delivered);
 		return 0;
 	}
 
@@ -994,7 +1020,6 @@ int evdi_ioctl_destroy_buff_callback(struct drm_device *dev, void *data, struct 
 int evdi_ioctl_swap_callback(struct drm_device *dev, void *data, struct drm_file *file)
 {
 	struct evdi_device *evdi = dev->dev_private;
-
 	struct drm_evdi_swap_callback *cb = data;
 	int d;
 
@@ -1009,6 +1034,9 @@ int evdi_ioctl_swap_callback(struct drm_device *dev, void *data, struct drm_file
 
 		atomic_set(&evdi->swap_pending_pollid[d], 0);
 		atomic_set(&evdi->swap_pending[d], 0);
+		/* store release fence if provided */
+		if (cb->release_fence_fd >= 0)
+			evdi_swap_release_fence_set_fd(evdi, (u32)d, cb->release_fence_fd);
 		wake_up_interruptible(&evdi->swap_ack_waitq);
 		break;
 	}
@@ -1093,6 +1121,9 @@ int evdi_queue_swap_event(struct evdi_device *evdi,
 	/* Do not overwrite an un-ACKed swap */
 	if (atomic_cmpxchg(&evdi->swap_pending[display_id], 0, 1) != 0)
 		return -EBUSY;
+
+	/* Snapshot the pending acquire fence for this swap */
+	evdi_swap_acquire_fence_snapshot(evdi, (u32)display_id);
 
 	client = READ_ONCE(evdi->drm_client);
 	if (client)

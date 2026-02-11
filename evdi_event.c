@@ -628,6 +628,16 @@ void evdi_event_cleanup_file(struct evdi_device *evdi, struct drm_file *file)
 	if (unlikely(!evdi || !file))
 		return;
 
+	/* Clear any pending fences for this file */
+	for (d = 0; d < LINDROID_MAX_CONNECTORS; d++) {
+		if (READ_ONCE(evdi->swap_mailbox[d].owner) == file) {
+			evdi_pending_acquire_fence_set_fd(evdi, (u32)d, -1);
+			mutex_lock(&evdi->fence_mutex);
+			/* Don't clear swap fences here as they might be in use */
+			mutex_unlock(&evdi->fence_mutex);
+		}
+	}
+
 	for (d = 0; d < LINDROID_MAX_CONNECTORS; d++) {
 		if (READ_ONCE(evdi->swap_mailbox[d].owner) != file)
 			continue;
