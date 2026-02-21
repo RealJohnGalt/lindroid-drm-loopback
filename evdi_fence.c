@@ -124,6 +124,59 @@ int evdi_swap_acquire_fence_get_fd(struct evdi_device *evdi, u32 display_id)
 	return fd;
 }
 
+int evdi_swap_acquire_fence_get_fd_reserve(struct evdi_device *evdi, u32 display_id,
+					  struct file **filep)
+{
+	struct dma_fence *fence;
+	struct sync_file *sync_file;
+	int fd;
+
+	if (!filep)
+		return -EINVAL;
+	*filep = NULL;
+
+	if (!evdi || display_id >= LINDROID_MAX_CONNECTORS)
+		return -EINVAL;
+	mutex_lock(&evdi->fence_mutex);
+	fence = evdi->swap_acquire_fence[display_id];
+	if (fence)
+		dma_fence_get(fence);
+	mutex_unlock(&evdi->fence_mutex);
+
+	if (!fence)
+		return -1;
+
+	sync_file = sync_file_create(fence);
+	dma_fence_put(fence);
+	if (!sync_file)
+		return -ENOMEM;
+
+	fd = get_unused_fd_flags(O_CLOEXEC);
+	if (fd < 0) {
+		fput(sync_file->file);
+		return fd;
+	}
+
+	*filep = sync_file->file;
+	return fd;
+}
+
+void evdi_swap_acquire_fence_clear(struct evdi_device *evdi, u32 display_id)
+{
+	struct dma_fence *old;
+
+	if (!evdi || display_id >= LINDROID_MAX_CONNECTORS)
+		return;
+
+	mutex_lock(&evdi->fence_mutex);
+	old = evdi->swap_acquire_fence[display_id];
+	evdi->swap_acquire_fence[display_id] = NULL;
+	mutex_unlock(&evdi->fence_mutex);
+
+	if (old)
+		dma_fence_put(old);
+}
+
 void evdi_swap_release_fence_set_fd(struct evdi_device *evdi, u32 display_id,
 				    int release_fence_fd)
 {
@@ -165,6 +218,36 @@ static struct dma_fence *evdi_swap_release_fence_take(struct evdi_device *evdi,
 	mutex_unlock(&evdi->fence_mutex);
 
 	return fence;
+}
+
+bool evdi_swap_release_fence_clear_if_signaled(struct evdi_device *evdi, u32 display_id)
+{
+	struct dma_fence *fence;
+	bool done;
+
+	if (!evdi || display_id >= LINDROID_MAX_CONNECTORS)
+		return true;
+
+	mutex_lock(&evdi->fence_mutex);
+	fence = evdi->swap_release_fence[display_id];
+	if (fence)
+		dma_fence_get(fence);
+	mutex_unlock(&evdi->fence_mutex);
+
+	if (!fence)
+		return true;
+
+	done = dma_fence_is_signaled(fence);
+	dma_fence_put(fence);
+
+	if (!done)
+		return false;
+
+	fence = evdi_swap_release_fence_take(evdi, display_id);
+	if (fence)
+		dma_fence_put(fence);
+
+	return true;
 }
 
 static void evdi_fence_clear_all_locked(struct evdi_device *evdi)

@@ -55,8 +55,6 @@ static void evdi_pipe_update(struct drm_simple_display_pipe *pipe,
 	int slot;
 	unsigned long timeout;
 	long w;
-	struct dma_fence *release_fence;
-	long fence_ret;
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 19, 0)
 	struct drm_pending_vblank_event *vblank_ev;
 	struct drm_device *ddev;
@@ -88,25 +86,6 @@ static void evdi_pipe_update(struct drm_simple_display_pipe *pipe,
 				atomic_read(&evdi->events.stopping) ||
 				!READ_ONCE(evdi->drm_client),
 			timeout);
-
-		if (w > 0 && !atomic_read(&evdi->swap_pending[slot])) {
-			/* swap_pending cleared, now wait for release fence if present */
-			mutex_lock(&evdi->fence_mutex);
-			release_fence = evdi->swap_release_fence[slot];
-			if (release_fence)
-				dma_fence_get(release_fence);
-			mutex_unlock(&evdi->fence_mutex);
-
-			if (release_fence) {
-				fence_ret = dma_fence_wait_timeout(release_fence, true, timeout);
-				if (fence_ret <= 0)
-					evdi_warn("Release fence wait timeout/error slot=%d ret=%ld\n", slot, fence_ret);
-				dma_fence_put(release_fence);
-			}
-
-			/* Clear the release fence after waiting */
-			evdi_swap_release_fence_wait_and_clear(evdi, (u32)slot);
-		}
 
 		if (w == 0) {
 			/* Drop backpressure to avoid stalls. */

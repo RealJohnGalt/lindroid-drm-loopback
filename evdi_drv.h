@@ -149,6 +149,8 @@
 
 struct evdi_device;
 
+struct file;
+
 struct evdi_gralloc_buf_user {
 	int version;
 	int numFds;
@@ -394,8 +396,11 @@ int evdi_queue_destroy_event(struct evdi_device *evdi, int id, struct drm_file *
 int evdi_pending_acquire_fence_set_fd(struct evdi_device *evdi, u32 display_id, int acquire_fence_fd);
 void evdi_swap_acquire_fence_snapshot(struct evdi_device *evdi, u32 display_id);
 int evdi_swap_acquire_fence_get_fd(struct evdi_device *evdi, u32 display_id);
+int evdi_swap_acquire_fence_get_fd_reserve(struct evdi_device *evdi, u32 display_id, struct file **filep);
+void evdi_swap_acquire_fence_clear(struct evdi_device *evdi, u32 display_id);
 void evdi_swap_release_fence_set_fd(struct evdi_device *evdi, u32 display_id, int release_fence_fd);
 void evdi_swap_release_fence_wait_and_clear(struct evdi_device *evdi, u32 display_id);
+bool evdi_swap_release_fence_clear_if_signaled(struct evdi_device *evdi, u32 display_id);
 void evdi_fence_init(struct evdi_device *evdi);
 void evdi_fence_cleanup(struct evdi_device *evdi);
 

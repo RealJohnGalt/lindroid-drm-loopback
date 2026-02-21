@@ -557,6 +557,7 @@ static int evdi_swap_with_fence(struct evdi_device *evdi, struct drm_evdi_poll *
 {
 	struct drm_evdi_swap swu;
 	int acquire_fd;
+	struct file *acquire_file = NULL;
 
 	if (!cmd->data)
 		return 0;
@@ -568,12 +569,25 @@ static int evdi_swap_with_fence(struct evdi_device *evdi, struct drm_evdi_poll *
 	/* Refresh snapshot to avoid -1 racing */
 	evdi_swap_acquire_fence_snapshot(evdi, (u32)sw->display_id);
 
-	/* Get acquire fence fd if available */
-	acquire_fd = evdi_swap_acquire_fence_get_fd(evdi, (u32)sw->display_id);
+	/* Reserve FD to install after copy_to_user */
+	acquire_fd = evdi_swap_acquire_fence_get_fd_reserve(evdi, (u32)sw->display_id,
+							   &acquire_file);
+	if (acquire_fd < 0) {
+		acquire_fd = -1;
+		acquire_file = NULL;
+	}
 	swu.acquire_fence_fd = acquire_fd;
 
-	if (evdi_copy_to_user_allow_partial(cmd->data, &swu, sizeof(swu)))
+	if (evdi_copy_to_user_allow_partial(cmd->data, &swu, sizeof(swu))) {
+		if (acquire_fd >= 0) {
+			put_unused_fd(acquire_fd);
+			fput(acquire_file);
+		}
 		return -EFAULT;
+	}
+
+	if (acquire_fd >= 0)
+		fd_install(acquire_fd, acquire_file);
 
 	return 0;
 }
@@ -1037,6 +1051,7 @@ int evdi_ioctl_swap_callback(struct drm_device *dev, void *data, struct drm_file
 
 		atomic_set(&evdi->swap_pending_pollid[d], 0);
 		atomic_set(&evdi->swap_pending[d], 0);
+		evdi_swap_acquire_fence_clear(evdi, (u32)d);
 		/* store release fence if provided */
 		if (cb->release_fence_fd >= 0)
 			evdi_swap_release_fence_set_fd(evdi, (u32)d, cb->release_fence_fd);
@@ -1121,7 +1136,9 @@ int evdi_queue_swap_event(struct evdi_device *evdi,
 	if (unlikely(atomic_read(&evdi->events.stopping)))
 		return -ENODEV;
 
-	/* Do not overwrite an un-ACKed swap */
+	/* Do not overwrite an un-ACKed swap or block modeset on release-fence */
+	if (!evdi_swap_release_fence_clear_if_signaled(evdi, (u32)display_id))
+		return -EBUSY;
 	if (atomic_cmpxchg(&evdi->swap_pending[display_id], 0, 1) != 0)
 		return -EBUSY;
 
