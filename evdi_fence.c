@@ -81,15 +81,20 @@ int evdi_pending_acquire_fence_set_fd(struct evdi_device *evdi, u32 display_id,
 
 void evdi_swap_acquire_fence_snapshot(struct evdi_device *evdi, u32 display_id)
 {
-	struct dma_fence *old_swap;
+	struct dma_fence *old_swap = NULL;
+	struct dma_fence *pending = NULL;
 
 	if (!evdi || display_id >= LINDROID_MAX_CONNECTORS)
 		return;
 
 	mutex_lock(&evdi->fence_mutex);
-	old_swap = evdi->swap_acquire_fence[display_id];
-	evdi->swap_acquire_fence[display_id] = evdi->pending_acquire_fence[display_id];
-	evdi->pending_acquire_fence[display_id] = NULL;
+	pending = evdi->pending_acquire_fence[display_id];
+	/* Only replace the swap fence for a new pending fence */
+	if (pending) {
+		old_swap = evdi->swap_acquire_fence[display_id];
+		evdi->swap_acquire_fence[display_id] = pending;
+		evdi->pending_acquire_fence[display_id] = NULL;
+	}
 	mutex_unlock(&evdi->fence_mutex);
 
 	if (old_swap)

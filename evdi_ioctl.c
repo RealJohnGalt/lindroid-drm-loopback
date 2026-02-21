@@ -565,6 +565,9 @@ static int evdi_swap_with_fence(struct evdi_device *evdi, struct drm_evdi_poll *
 	swu.id = sw->id;
 	swu.display_id = sw->display_id;
 
+	/* Refresh snapshot to avoid -1 racing */
+	evdi_swap_acquire_fence_snapshot(evdi, (u32)sw->display_id);
+
 	/* Get acquire fence fd if available */
 	acquire_fd = evdi_swap_acquire_fence_get_fd(evdi, (u32)sw->display_id);
 	swu.acquire_fence_fd = acquire_fd;
@@ -1121,9 +1124,6 @@ int evdi_queue_swap_event(struct evdi_device *evdi,
 	/* Do not overwrite an un-ACKed swap */
 	if (atomic_cmpxchg(&evdi->swap_pending[display_id], 0, 1) != 0)
 		return -EBUSY;
-
-	/* Snapshot the pending acquire fence for this swap */
-	evdi_swap_acquire_fence_snapshot(evdi, (u32)display_id);
 
 	client = READ_ONCE(evdi->drm_client);
 	if (client)
