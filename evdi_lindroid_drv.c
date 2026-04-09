@@ -74,6 +74,8 @@ static struct drm_driver evdi_driver = {
 			  DRIVER_GEM,
 
 	.dumb_create = evdi_dumb_create,
+	.dumb_map_offset = drm_gem_dumb_map_offset,
+	.dumb_destroy = drm_gem_dumb_destroy,
 #if KERNEL_VERSION(5, 9, 0) <= LINUX_VERSION_CODE
 	.gem_create_object = NULL,
 #endif
