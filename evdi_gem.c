@@ -62,17 +62,31 @@ static struct evdi_gem_object *evdi_gem_cache_alloc(gfp_t gfp)
 	return kmem_cache_zalloc(evdi_gem_cache, gfp);
 }
 
+static int evdi_gem_object_pin(struct drm_gem_object *obj)
+{
+	return evdi_pin_pages(obj ? to_evdi_bo(obj) : NULL);
+}
+
+static void evdi_gem_object_unpin(struct drm_gem_object *obj)
+{
+	evdi_unpin_pages(obj ? to_evdi_bo(obj) : NULL);
+}
+
 static void evdi_gem_vm_open(struct vm_area_struct *vma)
 {
-	struct evdi_gem_object *obj = to_evdi_bo(vma->vm_private_data);
+	struct drm_gem_object *obj = vma->vm_private_data;
+
 	drm_gem_vm_open(vma);
-	evdi_pin_pages(obj);
+	if (obj)
+		evdi_gem_object_pin(obj);
 }
 
 static void evdi_gem_vm_close(struct vm_area_struct *vma)
 {
-	struct evdi_gem_object *obj = to_evdi_bo(vma->vm_private_data);
-	evdi_unpin_pages(obj);
+	struct drm_gem_object *obj = vma->vm_private_data;
+
+	if (obj)
+		evdi_gem_object_unpin(obj);
 	drm_gem_vm_close(vma);
 }
 
@@ -83,27 +97,43 @@ const struct vm_operations_struct evdi_gem_vm_ops = {
 };
 
 #if KERNEL_VERSION(5, 11, 0) <= LINUX_VERSION_CODE
-static int evdi_prime_pin(struct drm_gem_object *obj)
-{
-	struct evdi_gem_object *bo = to_evdi_bo(obj);
-	return evdi_pin_pages(bo);
-}
-
-static void evdi_prime_unpin(struct drm_gem_object *obj)
-{
-	struct evdi_gem_object *bo = to_evdi_bo(obj);
-	evdi_unpin_pages(bo);
-}
-
 static const struct drm_gem_object_funcs gem_obj_funcs = {
 	.free = evdi_gem_free_object,
-	.pin = evdi_prime_pin,
-	.unpin = evdi_prime_unpin,
+	.pin = evdi_gem_object_pin,
+	.unpin = evdi_gem_object_unpin,
 	.vm_ops = &evdi_gem_vm_ops,
 	.export = drm_gem_prime_export,
 	.get_sg_table = evdi_prime_get_sg_table,
 };
 #endif
+
+static int evdi_gem_object_lifecycle_init(struct evdi_gem_object *obj)
+{
+	int ret;
+
+	atomic_set(&obj->pages_pin_count, 0);
+	mutex_init(&obj->pages_lock);
+
+	ret = drm_gem_create_mmap_offset(&obj->base);
+	if (ret) {
+		mutex_destroy(&obj->pages_lock);
+		return ret;
+	}
+
+#if KERNEL_VERSION(5, 11, 0) <= LINUX_VERSION_CODE
+	obj->base.funcs = &gem_obj_funcs;
+#endif
+
+	return 0;
+}
+
+static void evdi_gem_object_lifecycle_release(struct evdi_gem_object *obj)
+{
+	if (obj->base.dev && obj->base.dev->vma_offset_manager)
+		drm_gem_free_mmap_offset(&obj->base);
+
+	mutex_destroy(&obj->pages_lock);
+}
 
 static bool evdi_drm_gem_object_use_import_attach(struct drm_gem_object *obj)
 {
@@ -149,13 +179,11 @@ struct evdi_gem_object *evdi_gem_alloc_object(struct drm_device *dev, size_t siz
 		return NULL;
 	}
 
-	atomic_set(&obj->pages_pin_count, 0);
-
-#if KERNEL_VERSION(5, 11, 0) <= LINUX_VERSION_CODE
-	obj->base.funcs = &gem_obj_funcs;
-#endif
-
-	mutex_init(&obj->pages_lock);
+	if (evdi_gem_object_lifecycle_init(obj) != 0) {
+		drm_gem_object_release(&obj->base);
+		kmem_cache_free(evdi_gem_cache, obj);
+		return NULL;
+	}
 
 	return obj;
 }
@@ -248,6 +276,7 @@ int evdi_drm_gem_mmap(struct file *filp, struct vm_area_struct *vma)
 		}
 	}
 #endif
+
 	return ret;
 }
 
@@ -268,6 +297,14 @@ int evdi_gem_fault(struct vm_fault *vmf)
 
 	page_offset = (vmf->address - vma->vm_start) >> PAGE_SHIFT;
 	num_pages = obj->base.size >> PAGE_SHIFT;
+
+	if (!obj->pages) {
+		ret = evdi_pin_pages(obj);
+		if (ret == -ENOMEM)
+			return VM_FAULT_OOM;
+		if (ret)
+			return VM_FAULT_SIGBUS;
+	}
 
 	if (!obj->pages || page_offset >= num_pages)
 		return VM_FAULT_SIGBUS;
@@ -547,10 +584,7 @@ void evdi_gem_free_object(struct drm_gem_object *gem_obj)
 	if (obj->pages)
 		evdi_gem_put_pages(obj);
 
-	if (gem_obj->dev->vma_offset_manager)
-		drm_gem_free_mmap_offset(gem_obj);
-
-	mutex_destroy(&obj->pages_lock);
+	evdi_gem_object_lifecycle_release(obj);
 
 	drm_gem_object_release(&obj->base);
 	kmem_cache_free(evdi_gem_cache, obj);

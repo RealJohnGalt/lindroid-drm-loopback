@@ -61,7 +61,7 @@ static __always_inline int evdi_pipe_slot(const struct evdi_device *evdi,
 
 static void evdi_pipe_update(struct drm_simple_display_pipe *pipe,
                              struct drm_plane_state *old_state)
-{
+ {
 	struct drm_plane_state *state = pipe->plane.state;
 	struct drm_framebuffer *fb = state ? state->fb : NULL;
 	struct evdi_device *evdi = pipe->plane.dev->dev_private;
@@ -158,6 +158,9 @@ int evdi_modeset_init(struct drm_device *dev)
 	struct evdi_device *evdi = dev->dev_private;
 	int ret = 0;
 	int i;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
+	unsigned int crtcmask;
+#endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0)
 	ret = drm_mode_config_init(dev);
@@ -198,11 +201,30 @@ int evdi_modeset_init(struct drm_device *dev)
 			evdi_err("Failed to initialize simple display pipe[%d]: %d", i, ret);
 			goto err_pipe;
 		}
+
+		/*
+		 * Older kver DRM/KMS are less forgiving about connector/encoder topology
+		 * being fully configured after drm_simple_display_pipe_init().
+		 */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
+		crtcmask = drm_crtc_mask(&evdi->pipe[i].crtc);
+		if (!evdi->pipe[i].encoder.possible_crtcs)
+			evdi->pipe[i].encoder.possible_crtcs = crtcmask;
+
+		ret = drm_connector_attach_encoder(evdi->connector[i],
+						   &evdi->pipe[i].encoder);
+		if (ret && ret != -EEXIST) {
+			evdi_err("Failed to attach connector[%d] to encoder: %d",
+				 i, ret);
+			goto err_pipe;
+		}
+#endif
 	}
 
 #if !EVDI_HAVE_ATOMIC_HELPERS
 	for (i = 0; i < LINDROID_MAX_CONNECTORS; i++) {
 		static const struct drm_crtc_helper_funcs crtc_helper = {
+
 			.dpms = evdi_crtc_dpms,
 			.mode_fixup = evdi_crtc_mode_fixup,
 			.mode_set = evdi_crtc_mode_set,

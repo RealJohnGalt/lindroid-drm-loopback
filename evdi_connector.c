@@ -44,40 +44,75 @@ evdi_connector_detect(struct drm_connector *connector, bool force)
 	   connector_status_disconnected;
 }
 
+static struct drm_display_mode *evdi_connector_make_mode(struct drm_connector *connector,
+                                                     u32 width, u32 height,
+                                                     u32 refresh)
+{
+	struct drm_display_mode *mode;
+
+	if (!refresh)
+		refresh = 60;
+
+	mode = drm_cvt_mode(connector->dev, width, height, refresh,
+			    false, false, false);
+	if (mode)
+		return mode;
+
+	mode = drm_mode_create(connector->dev);
+	if (!mode)
+		return NULL;
+
+	mode->hdisplay = width;
+	mode->vdisplay = height;
+	mode->hsync_start = mode->hdisplay + 80;
+	mode->hsync_end = mode->hsync_start + 32;
+	mode->htotal = mode->hsync_end + 48;
+
+	mode->vsync_start = mode->vdisplay + 3;
+	mode->vsync_end = mode->vsync_start + 5;
+	mode->vtotal = mode->vsync_end + 14;
+	mode->clock = mode->htotal * mode->vtotal * refresh / 1000;
+
+	drm_mode_set_name(mode);
+	return mode;
+}
+
 static int evdi_connector_get_modes(struct drm_connector *connector)
 {
 	struct evdi_device *evdi = connector->dev->dev_private;
 	struct drm_display_mode *mode;
 	int id;
 
+	if (unlikely(!evdi))
+		return 0;
+
 	id = evdi_connector_slot(evdi, connector);
 	if (unlikely(id < 0) || !evdi_likely_connected(evdi, id))
 		return 0;
 
-	mode = drm_mode_create(connector->dev);
+	mode = evdi_connector_make_mode(connector,
+				 evdi->displays[id].width,
+				 evdi->displays[id].height,
+				 evdi->displays[id].refresh_rate);
 	if (!mode)
 		return 0;
 
-	mode->hdisplay = evdi->displays[id].width;
-	mode->vdisplay = evdi->displays[id].height;
+	mode->type |= DRM_MODE_TYPE_PREFERRED | DRM_MODE_TYPE_DRIVER;
 
-	mode->hsync_start = mode->hdisplay + 1;
-	mode->hsync_end = mode->hsync_start + 1;
-	mode->htotal = mode->hsync_end + 1;
+	connector->display_info.width_mm =
+		max_t(u32, 1,
+		      DIV_ROUND_CLOSEST(evdi->displays[id].width * 254, 960));
+	connector->display_info.height_mm =
+		max_t(u32, 1,
+		      DIV_ROUND_CLOSEST(evdi->displays[id].height * 254, 960));
 
-	mode->vsync_start = mode->vdisplay + 1;
-	mode->vsync_end = mode->vsync_start + 1;
-	mode->vtotal = mode->vsync_end + 1;
-
-	mode->clock = mode->htotal * mode->vtotal * evdi->displays[id].refresh_rate / 1000;
-
-	mode->type = DRM_MODE_TYPE_PREFERRED | DRM_MODE_TYPE_DRIVER;
-
-	drm_mode_set_name(mode);
 	drm_mode_probed_add(connector, mode);
 
 	evdi_debug("Created mode %ux%u@%uHz for device %d",
-		  evdi->width, evdi->height, evdi->refresh_rate, evdi->dev_index);
+		   evdi->displays[id].width,
+		   evdi->displays[id].height,
+		   evdi->displays[id].refresh_rate,
+		   evdi->dev_index);
 
 	return 1;
 }
