@@ -115,6 +115,7 @@ static int evdi_driver_open(struct drm_device *dev, struct drm_file *file)
 		return -ENOMEM;
 
 	priv->swap_rr = 0;
+	memset(priv->last_swap_poll_id, 0, sizeof(priv->last_swap_poll_id));
 	priv->pending_swaps = 0;
 	file->driver_priv = priv;
 
@@ -141,7 +142,7 @@ static void evdi_driver_postclose(struct drm_device *dev, struct drm_file *file)
 
 	if (priv) {
 		WRITE_ONCE(priv->pending_swaps, 0);
-		memset(priv->last_swap_payload, 0, sizeof(priv->last_swap_payload));
+		memset(priv->last_swap_poll_id, 0, sizeof(priv->last_swap_poll_id));
 		priv->swap_rr = 0;
 
 		kfree(priv);

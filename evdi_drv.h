@@ -288,7 +288,7 @@ struct evdi_display {
 };
 
 struct evdi_file_priv {
-	u64 last_swap_payload[LINDROID_MAX_CONNECTORS];
+	int last_swap_poll_id[LINDROID_MAX_CONNECTORS];
 	u8 swap_rr;
 	unsigned long pending_swaps;
 };
@@ -327,6 +327,8 @@ struct evdi_device {
 	} events;
 
 	struct evdi_swap_mailbox swap_mailbox[LINDROID_MAX_CONNECTORS];
+
+	atomic64_t pending_swap_payload[LINDROID_MAX_CONNECTORS];
 
 	struct mutex config_mutex;
 
@@ -566,6 +568,9 @@ struct evdi_perf_counters {
 	atomic64_t allocs;
 	atomic64_t swap_updates;
 	atomic64_t swap_delivered;
+	atomic64_t swap_published;
+	atomic64_t swap_dropped_stale;
+	atomic64_t swap_client_miss;
 	atomic64_t wakeup_count;
 	atomic64_t poll_cycles;
 	atomic64_t inflight_percpu_hits;

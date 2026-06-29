@@ -204,6 +204,7 @@ int evdi_event_init(struct evdi_device *evdi)
 		atomic64_set(&evdi->swap_mailbox[i].payload, 0);
 		atomic_set(&evdi->swap_mailbox[i].poll_id, 0);
 		WRITE_ONCE(evdi->swap_mailbox[i].owner, NULL);
+		atomic64_set(&evdi->pending_swap_payload[i], 0);
 	}
 
 	evdi_smp_wmb();
@@ -235,6 +236,8 @@ void evdi_swap_mailbox_invalidate_display(struct evdi_device *evdi, int display_
 	evdi_smp_wmb();
 	/* Clear lock bit - payload (zero) now consistent */
 	atomic64_set(&mb->payload, 0);
+
+	atomic64_set(&evdi->pending_swap_payload[display_id], 0);
 
 	priv = old_owner ? old_owner->driver_priv : NULL;
 	if (priv)
@@ -683,7 +686,7 @@ void evdi_event_cleanup_file(struct evdi_device *evdi, struct drm_file *file)
 	priv = file->driver_priv;
 	if (priv) {
 		WRITE_ONCE(priv->pending_swaps, 0);
-		memset(priv->last_swap_payload, 0, sizeof(priv->last_swap_payload));
+		memset(priv->last_swap_poll_id, 0, sizeof(priv->last_swap_poll_id));
 		priv->swap_rr = 0;
 	}
 
